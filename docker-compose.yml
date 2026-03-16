@@ -1,0 +1,14 @@
+services:
+  mysql-mcp:
+    build: .
+    container_name: mysql-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8431}:8431"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8431"
+      RUST_LOG: "${RUST_LOG:-mysql_mcp=info}"
+      MYSQL_DATABASES: '${MYSQL_DATABASES}'
