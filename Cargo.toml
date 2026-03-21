@@ -10,6 +10,9 @@ license = "MIT"
 authors = ["Mathieu-Philippe Bourgeois <bourgeois.mat@gmail.com>"]
 description = "A lightweight Rust MCP server for read-only MySQL access with multi-database support"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "mysql-mcp"
 path = "src/main.rs"
