@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Row, TypeInfo};
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
 
 use crate::config::{Config, DatabaseConfig};
@@ -91,6 +91,7 @@ pub fn row_to_json(row: &MySqlRow) -> serde_json::Value {
     for col in row.columns() {
         let name = col.name().to_string();
         let type_name = col.type_info().name().to_uppercase();
+        tracing::debug!("Column '{name}' type_info='{}' normalized='{type_name}'", col.type_info().name());
 
         let value: serde_json::Value = if type_name == "NULL" {
             serde_json::Value::Null
@@ -158,12 +159,27 @@ pub fn row_to_json(row: &MySqlRow) -> serde_json::Value {
                         .unwrap_or_else(|| serde_json::Value::String(d.to_string()))
                 })
                 .unwrap_or(serde_json::Value::Null)
-        } else if type_name.starts_with("DATETIME") || type_name.starts_with("TIMESTAMP") {
-            row.try_get::<Option<NaiveDateTime>, _>(name.as_str())
-                .ok()
-                .flatten()
-                .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
-                .unwrap_or(serde_json::Value::Null)
+        } else if type_name.starts_with("TIMESTAMP") {
+            // TIMESTAMP columns require DateTime<Utc> in sqlx — NaiveDateTime won't work
+            match row.try_get::<Option<DateTime<Utc>>, _>(name.as_str()) {
+                Ok(opt) => opt
+                    .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
+                    .unwrap_or(serde_json::Value::Null),
+                Err(e) => {
+                    tracing::warn!("Failed to decode {name} (type={type_name}): {e:?}");
+                    serde_json::Value::Null
+                }
+            }
+        } else if type_name.starts_with("DATETIME") {
+            match row.try_get::<Option<NaiveDateTime>, _>(name.as_str()) {
+                Ok(opt) => opt
+                    .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
+                    .unwrap_or(serde_json::Value::Null),
+                Err(e) => {
+                    tracing::warn!("Failed to decode {name} (type={type_name}): {e:?}");
+                    serde_json::Value::Null
+                }
+            }
         } else if type_name.starts_with("DATE") {
             row.try_get::<Option<NaiveDate>, _>(name.as_str())
                 .ok()
