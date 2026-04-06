@@ -31,7 +31,6 @@ pub async fn run() {
     );
 
     let pool_manager = Arc::new(PoolManager::new(&cfg).await);
-    tracing::info!("All database connections established");
 
     let mcp_pool = pool_manager.clone();
     let mcp_cfg = cfg.clone();

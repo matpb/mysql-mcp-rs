@@ -9,7 +9,7 @@ use sqlx::{Column, Row, TypeInfo};
 use crate::config::{Config, DatabaseConfig};
 
 pub struct PoolManager {
-    pools: HashMap<String, MySqlPool>,
+    pools: tokio::sync::RwLock<HashMap<String, MySqlPool>>,
     configs: HashMap<String, DatabaseConfig>,
 }
 
@@ -19,46 +19,88 @@ impl PoolManager {
         let mut configs = HashMap::new();
 
         for db_config in &config.databases {
-            let opts = MySqlConnectOptions::new()
-                .host(&db_config.host)
-                .port(db_config.port)
-                .username(&db_config.user)
-                .password(&db_config.password)
-                .database(&db_config.database);
-
-            let pool = MySqlPoolOptions::new()
-                .max_connections(db_config.max_connections)
-                .acquire_timeout(Duration::from_secs(10))
-                .idle_timeout(Duration::from_secs(300))
-                .connect_with(opts)
-                .await
-                .unwrap_or_else(|e| {
-                    panic!("Failed to connect to database '{}': {e}", db_config.name)
-                });
-
-            sqlx::query("SELECT 1")
-                .execute(&pool)
-                .await
-                .unwrap_or_else(|e| panic!("Failed to ping database '{}': {e}", db_config.name));
-
-            tracing::info!(
-                "Connected to database '{}' at {}:{}",
-                db_config.name,
-                db_config.host,
-                db_config.port
-            );
-            pools.insert(db_config.name.clone(), pool);
             configs.insert(db_config.name.clone(), db_config.clone());
+
+            match Self::try_connect(db_config).await {
+                Ok(pool) => {
+                    tracing::info!(
+                        "Connected to database '{}' at {}:{}",
+                        db_config.name,
+                        db_config.host,
+                        db_config.port
+                    );
+                    pools.insert(db_config.name.clone(), pool);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Database '{}' unavailable at startup (will retry on access): {e}",
+                        db_config.name
+                    );
+                }
+            }
         }
 
-        Self { pools, configs }
+        Self {
+            pools: tokio::sync::RwLock::new(pools),
+            configs,
+        }
     }
 
-    pub fn get_pool(&self, name: &str) -> Result<&MySqlPool, String> {
-        self.pools.get(name).ok_or_else(|| {
-            let available: Vec<&str> = self.pools.keys().map(|s| s.as_str()).collect();
-            format!("Unknown database '{name}'. Available: {available:?}")
-        })
+    async fn try_connect(db_config: &DatabaseConfig) -> Result<MySqlPool, String> {
+        let opts = MySqlConnectOptions::new()
+            .host(&db_config.host)
+            .port(db_config.port)
+            .username(&db_config.user)
+            .password(&db_config.password)
+            .database(&db_config.database);
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(db_config.max_connections)
+            .acquire_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(300))
+            .connect_with(opts)
+            .await
+            .map_err(|e| format!("{e}"))?;
+
+        sqlx::query("SELECT 1")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("ping failed: {e}"))?;
+
+        Ok(pool)
+    }
+
+    pub async fn get_pool(&self, name: &str) -> Result<MySqlPool, String> {
+        // Fast path: pool already exists
+        {
+            let pools = self.pools.read().await;
+            if let Some(pool) = pools.get(name) {
+                return Ok(pool.clone());
+            }
+        }
+
+        // Check if it's a known database
+        let db_config = self.configs.get(name).ok_or_else(|| {
+            let available: Vec<&str> = self.configs.keys().map(|s| s.as_str()).collect();
+            format!("Unknown database '{name}'. Configured: {available:?}")
+        })?;
+
+        // Try to connect
+        tracing::info!("Attempting to connect to database '{name}'...");
+        let pool = Self::try_connect(db_config)
+            .await
+            .map_err(|e| format!("Database '{name}' is currently unavailable: {e}"))?;
+
+        tracing::info!(
+            "Connected to database '{}' at {}:{}",
+            db_config.name,
+            db_config.host,
+            db_config.port
+        );
+
+        let mut pools = self.pools.write().await;
+        pools.insert(name.to_string(), pool.clone());
+        Ok(pool)
     }
 
     pub fn get_config(&self, name: &str) -> Option<&DatabaseConfig> {
@@ -66,11 +108,12 @@ impl PoolManager {
     }
 
     pub fn database_names(&self) -> Vec<&str> {
-        self.pools.keys().map(|s| s.as_str()).collect()
+        self.configs.keys().map(|s| s.as_str()).collect()
     }
 
     pub async fn close_all(&self) {
-        for (name, pool) in &self.pools {
+        let pools = self.pools.read().await;
+        for (name, pool) in pools.iter() {
             pool.close().await;
             tracing::info!("Closed connection pool for '{name}'");
         }

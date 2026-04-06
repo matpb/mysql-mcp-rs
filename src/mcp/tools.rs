@@ -155,10 +155,11 @@ impl MysqlMcp {
         let pool = self
             .pool_manager
             .get_pool(&p.database)
+            .await
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
         let rows = sqlx::query("SHOW TABLES")
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "SHOW TABLES query failed");
@@ -212,13 +213,14 @@ impl MysqlMcp {
         let pool = self
             .pool_manager
             .get_pool(&p.database)
+            .await
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
         let table_name = safe_table_ident(&p.table)?;
 
         // Get columns
         let columns = sqlx::query(&format!("DESCRIBE `{table_name}`"))
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .map_err(|e| {
                 tracing::error!(table = %table_name, error = %e, "DESCRIBE query failed");
@@ -237,7 +239,7 @@ impl MysqlMcp {
 
         // Get indexes
         let indexes = sqlx::query(&format!("SHOW INDEX FROM `{table_name}`"))
-            .fetch_all(pool)
+            .fetch_all(&pool)
             .await
             .unwrap_or_default();
 
@@ -268,7 +270,7 @@ impl MysqlMcp {
 
         // Get table status
         let status = sqlx::query(&format!("SHOW TABLE STATUS LIKE '{table_name}'"))
-            .fetch_optional(pool)
+            .fetch_optional(&pool)
             .await
             .unwrap_or(None);
 
@@ -296,6 +298,7 @@ impl MysqlMcp {
         let pool = self
             .pool_manager
             .get_pool(&p.database)
+            .await
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
         // Sanitize the query
@@ -324,7 +327,7 @@ impl MysqlMcp {
         let start = Instant::now();
         let query_result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            sqlx::query(&final_query).fetch_all(pool),
+            sqlx::query(&final_query).fetch_all(&pool),
         )
         .await;
 
