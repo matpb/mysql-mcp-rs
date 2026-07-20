@@ -166,7 +166,11 @@ pub fn sanitize(query: &str) -> SanitizeResult {
 /// Apply a LIMIT clause to SELECT queries that don't have one.
 pub fn apply_limit(query: &str, max_rows: u32) -> String {
     if IS_SELECT.is_match(query) && !HAS_LIMIT.is_match(query) {
-        format!("{query} LIMIT {max_rows}")
+        // Trim a trailing statement terminator before appending LIMIT, otherwise a
+        // query like `SELECT ... ;` becomes `SELECT ... ; LIMIT {n}`, which MySQL
+        // rejects with error 1064 (syntax error near 'LIMIT').
+        let trimmed = query.trim_end().trim_end_matches(';').trim_end();
+        format!("{trimmed} LIMIT {max_rows}")
     } else {
         query.to_string()
     }
@@ -313,12 +317,38 @@ fn has_multiple_statements(query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_string_literals;
+    use super::{apply_limit, strip_string_literals};
 
     #[test]
     fn strip_string_literals_redacts_quoted_content() {
         assert_eq!(strip_string_literals("SELECT 'DROP TABLE'"), "SELECT ''");
         assert_eq!(strip_string_literals(r"SELECT 'it\'s'"), "SELECT ''");
         assert_eq!(strip_string_literals("SELECT \"DELETE\""), "SELECT \"\"");
+    }
+
+    #[test]
+    fn apply_limit_appends_to_bare_select() {
+        assert_eq!(apply_limit("SELECT * FROM t", 1000), "SELECT * FROM t LIMIT 1000");
+    }
+
+    #[test]
+    fn apply_limit_trims_trailing_semicolon() {
+        // The bug this guards: `... ; LIMIT n` is a MySQL syntax error (1064).
+        assert_eq!(apply_limit("SELECT * FROM t;", 1000), "SELECT * FROM t LIMIT 1000");
+        assert_eq!(
+            apply_limit("SELECT id FROM t ORDER BY id ;", 1000),
+            "SELECT id FROM t ORDER BY id LIMIT 1000"
+        );
+    }
+
+    #[test]
+    fn apply_limit_leaves_existing_limit_untouched() {
+        // Already limited: returned verbatim, trailing semicolon and all.
+        assert_eq!(apply_limit("SELECT * FROM t LIMIT 10;", 1000), "SELECT * FROM t LIMIT 10;");
+    }
+
+    #[test]
+    fn apply_limit_ignores_non_select() {
+        assert_eq!(apply_limit("SHOW TABLES;", 1000), "SHOW TABLES;");
     }
 }
