@@ -59,12 +59,39 @@ pub fn load_databases_from_json(json: &str) -> Result<Vec<DatabaseConfig>, Strin
     Ok(databases)
 }
 
+/// Builds a one-database config from flat `MYSQL_*` vars, the ergonomic form for
+/// a stdio client whose config file holds a plain env map rather than JSON.
+pub fn load_single_database_from_env() -> Option<DatabaseConfig> {
+    let database = env::var("MYSQL_DATABASE").ok()?;
+    Some(DatabaseConfig {
+        name: env::var("MYSQL_NAME").unwrap_or_else(|_| database.clone()),
+        host: env::var("MYSQL_HOST").unwrap_or_else(|_| "localhost".into()),
+        port: env::var("MYSQL_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(3306),
+        user: env::var("MYSQL_USER").unwrap_or_else(|_| "root".into()),
+        password: env::var("MYSQL_PASSWORD").unwrap_or_default(),
+        database,
+        max_connections: env::var("MYSQL_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_pool_size),
+        query_timeout_secs: env::var("MYSQL_QUERY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(default_query_timeout),
+    })
+}
+
 impl Config {
     pub fn from_env() -> Self {
-        let databases_json = env::var("MYSQL_DATABASES")
-            .expect("MYSQL_DATABASES env var is required (JSON array of database configs)");
-
-        let databases = load_databases_from_json(&databases_json).unwrap_or_else(|e| panic!("{e}"));
+        let databases = match env::var("MYSQL_DATABASES") {
+            Ok(json) => load_databases_from_json(&json).unwrap_or_else(|e| panic!("{e}")),
+            Err(_) => vec![load_single_database_from_env().expect(
+                "set MYSQL_DATABASES (JSON array) or MYSQL_DATABASE (+ MYSQL_HOST/PORT/USER/PASSWORD)",
+            )],
+        };
 
         Self::from_parts(
             env::var("MCP_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
