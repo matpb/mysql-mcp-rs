@@ -70,8 +70,8 @@ async fn run_http() {
         },
     );
 
-    // Permissive CORS: MCP clients (IDEs, CLI tools, web UIs) use varied origins;
-    // the server is intended to run locally or behind a firewall.
+    // Permissive CORS: MCP clients (IDEs, CLI tools, web UIs) use varied origins.
+    // Safe only because the default bind is loopback; there is no authentication.
     let app = axum::Router::new()
         .route("/health", axum::routing::get(health))
         .route("/mcp", axum::routing::any_service(mcp_service))
@@ -81,6 +81,12 @@ async fn run_http() {
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();
     tracing::info!("MySQL MCP server listening on {addr}");
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            "MCP_HOST={} exposes an unauthenticated server beyond loopback; put it behind a firewall, VPN or authenticating proxy",
+            addr.ip()
+        );
+    }
 
     let shutdown = async {
         tokio::signal::ctrl_c().await.ok();

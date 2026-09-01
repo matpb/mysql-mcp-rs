@@ -39,12 +39,24 @@ fn default_query_timeout() -> u64 {
     30
 }
 
+fn default_max_value_bytes() -> usize {
+    4096
+}
+
+fn default_max_binary_preview_bytes() -> usize {
+    256
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
     pub port: u16,
     pub databases: Vec<DatabaseConfig>,
     pub default_max_rows: u32,
+    /// Byte cap on a single text/JSON value before it is truncated with a marker.
+    pub max_value_bytes: usize,
+    /// Source-byte cap on a binary value before its hex preview is truncated.
+    pub max_binary_preview_bytes: usize,
 }
 
 /// Parses the JSON array used for the `MYSQL_DATABASES` environment variable.
@@ -52,7 +64,7 @@ pub struct Config {
 /// Returns an error if the JSON is invalid or the array is empty.
 pub fn load_databases_from_json(json: &str) -> Result<Vec<DatabaseConfig>, String> {
     let databases: Vec<DatabaseConfig> = serde_json::from_str(json)
-        .map_err(|_| "MYSQL_DATABASES must be valid JSON array".to_string())?;
+        .map_err(|e| format!("MYSQL_DATABASES must be a valid JSON array: {e}"))?;
     if databases.is_empty() {
         return Err("MYSQL_DATABASES must contain at least one database config".into());
     }
@@ -93,8 +105,10 @@ impl Config {
             )],
         };
 
-        Self::from_parts(
-            env::var("MCP_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
+        // Loopback by default: the server has no authentication and permissive CORS.
+        // docker-compose sets MCP_HOST=0.0.0.0 explicitly to reach the published port.
+        let cfg = Self::from_parts(
+            env::var("MCP_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             env::var("MCP_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
@@ -104,7 +118,19 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
-        )
+        );
+
+        Self {
+            max_value_bytes: env::var("MAX_VALUE_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_max_value_bytes),
+            max_binary_preview_bytes: env::var("MAX_BINARY_PREVIEW_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_max_binary_preview_bytes),
+            ..cfg
+        }
     }
 
     /// Builds a [`Config`] without reading the environment (tests and tooling).
@@ -119,6 +145,8 @@ impl Config {
             port,
             databases,
             default_max_rows,
+            max_value_bytes: default_max_value_bytes(),
+            max_binary_preview_bytes: default_max_binary_preview_bytes(),
         }
     }
 
@@ -164,10 +192,25 @@ mod tests {
 
     #[test]
     fn load_databases_rejects_invalid_json() {
-        assert_eq!(
-            load_databases_from_json("not json").unwrap_err(),
-            "MYSQL_DATABASES must be valid JSON array"
-        );
+        let err = load_databases_from_json("not json").unwrap_err();
+        assert!(err.starts_with("MYSQL_DATABASES must be a valid JSON array: "));
+        assert!(err.contains("at line 1 column"), "{err}");
+    }
+
+    #[test]
+    fn load_databases_error_names_the_missing_field() {
+        let err = load_databases_from_json(
+            r#"[{"name":"x","host":"h","user":"u","password":"p","database":"d"}]"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("missing field `port`"), "{err}");
+    }
+
+    #[test]
+    fn value_limits_have_defaults() {
+        let cfg = Config::from_parts("127.0.0.1", 8431, vec![], 1000);
+        assert_eq!(cfg.max_value_bytes, 4096);
+        assert_eq!(cfg.max_binary_preview_bytes, 256);
     }
 
     #[test]

@@ -1,3 +1,6 @@
+//! Read-only query gate. This is a usability guard that catches obvious writes early;
+//! the actual boundary is the MySQL account's read-only GRANT.
+
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -7,34 +10,11 @@ pub struct SanitizeResult {
     pub sanitized_query: String,
 }
 
-static MUTATION_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r"(?i)^\s*INSERT\s+",
-        r"(?i)^\s*UPDATE\s+",
-        r"(?i)^\s*DELETE\s+",
-        r"(?i)^\s*DROP\s+",
-        r"(?i)^\s*CREATE\s+",
-        r"(?i)^\s*ALTER\s+",
-        r"(?i)^\s*TRUNCATE\s+",
-        r"(?i)^\s*RENAME\s+",
-        r"(?i)^\s*REPLACE\s+",
-        r"(?i)^\s*LOAD\s+",
-        r"(?i)^\s*GRANT\s+",
-        r"(?i)^\s*REVOKE\s+",
-        r"(?i)^\s*FLUSH\s+",
-        r"(?i)^\s*LOCK\s+",
-        r"(?i)^\s*UNLOCK\s+",
-        r"(?i)^\s*CALL\s+",
-        r"(?i)^\s*START\s+TRANSACTION",
-        r"(?i)^\s*BEGIN",
-        r"(?i)^\s*COMMIT",
-        r"(?i)^\s*ROLLBACK",
-        r"(?i)^\s*SAVEPOINT",
-        r"(?i)^\s*RELEASE\s+SAVEPOINT",
-    ]
-    .iter()
-    .map(|p| Regex::new(p).unwrap())
-    .collect()
+static MUTATION_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|RENAME|REPLACE|LOAD|GRANT|REVOKE|FLUSH|LOCK|UNLOCK|CALL|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT)\b",
+    )
+    .unwrap()
 });
 
 static ALLOWED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -46,114 +26,126 @@ static ALLOWED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?i)^\s*EXPLAIN\s+",
         r"(?i)^\s*WITH\s+",
         r"(?i)^\s*SET\s+@",
+        r"(?i)^\s*TABLE\s+",
+        r"(?i)^\s*VALUES\s+",
+        r"(?i)^\s*\(\s*(?:\(\s*)*(?:SELECT|TABLE|VALUES|WITH)\b",
     ]
     .iter()
     .map(|p| Regex::new(p).unwrap())
     .collect()
 });
 
-static DANGEROUS_KEYWORDS: &[&str] = &[
-    "INTO OUTFILE",
-    "INTO DUMPFILE",
-    "FOR UPDATE",
-    "LOCK IN SHARE MODE",
-];
+static SET_USER_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*SET\s+@").unwrap());
+static SET_SCOPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:GLOBAL|PERSIST_ONLY|PERSIST|SESSION|LOCAL)\b").unwrap());
 
-static EMBEDDED_DML: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+/// `SET @@x = 1` is a session write that names no scope keyword.
+static SET_SYSTEM_ASSIGN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@@[A-Za-z0-9_.$]*\s*=").unwrap());
+
+/// A `@@var` reference, so the scope scan cannot fire on the read side of `SET @x = @@session.y`.
+static SYSTEM_VAR_REF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@@[A-Za-z0-9_.$]*").unwrap());
+
+static DANGEROUS_CONSTRUCTS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     [
-        r"(?i)\bINSERT\b",
-        r"(?i)\bUPDATE\b",
-        r"(?i)\bDELETE\b",
-        r"(?i)\bDROP\b",
-        r"(?i)\bCREATE\b",
-        r"(?i)\bALTER\b",
-        r"(?i)\bTRUNCATE\b",
-        r"(?i)\bRENAME\b",
-        r"(?i)\bREPLACE\b",
-        r"(?i)\bLOAD\b",
-        r"(?i)\bGRANT\b",
-        r"(?i)\bREVOKE\b",
+        ("INTO OUTFILE", r"(?i)\bINTO\s+OUTFILE\b"),
+        ("INTO DUMPFILE", r"(?i)\bINTO\s+DUMPFILE\b"),
+        ("FOR UPDATE", r"(?i)\bFOR\s+UPDATE\b"),
+        ("FOR SHARE", r"(?i)\bFOR\s+SHARE\b"),
+        ("LOCK IN SHARE MODE", r"(?i)\bLOCK\s+IN\s+SHARE\s+MODE\b"),
+        ("LOAD_FILE()", r"(?i)\bLOAD_FILE\s*\("),
     ]
     .iter()
-    .map(|p| Regex::new(p).unwrap())
+    .map(|(label, p)| (*label, Regex::new(p).unwrap()))
     .collect()
 });
 
-static HAS_LIMIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bLIMIT\s+\d+").unwrap());
-static IS_SELECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*SELECT\s+").unwrap());
+// Reserved verbs cannot be unquoted identifiers, so `VERB` + whitespace is enough; the
+// non-reserved ones are also function names, so they need their statement object token.
+static EMBEDDED_WRITE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:INSERT|UPDATE|DELETE|DROP|ALTER|RENAME|GRANT|REVOKE)\s|\bREPLACE\s+(?:LOW_PRIORITY\s+|DELAYED\s+)*INTO\b|\bTRUNCATE\s+TABLE\b|\bLOAD\s+(?:DATA|XML)\b",
+    )
+    .unwrap()
+});
+
+// Leftmost-first: the SHOW CREATE alternative consumes the CREATE token, so only a bare
+// CREATE elsewhere makes group 1 participate.
+static EMBEDDED_CREATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bSHOW\s+CREATE\b|\b(CREATE)\b").unwrap());
+
+static LIMITABLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:SELECT\b|WITH\b|TABLE\b|\(\s*(?:\(\s*)*(?:SELECT|TABLE|WITH)\b)")
+        .unwrap()
+});
+static LIMIT_KEYWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bLIMIT\b").unwrap());
+static TRAILING_LIMIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bLIMIT\s+(\d+)\s*(?:,\s*(\d+)\s*)?(?:OFFSET\s+\d+\s*)?;?\s*$").unwrap()
+});
 
 pub fn sanitize(query: &str) -> SanitizeResult {
-    let sanitized = remove_comments(query).trim().to_string();
+    let sanitized = match remove_comments(query) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => return reject(e),
+    };
 
     if sanitized.is_empty() {
-        return SanitizeResult {
-            is_valid: false,
-            error: Some("Query is empty".into()),
-            sanitized_query: String::new(),
-        };
+        return reject("Query is empty".into());
     }
 
-    // Check for mutation patterns
-    for pattern in MUTATION_PATTERNS.iter() {
-        if pattern.is_match(&sanitized) {
-            return SanitizeResult {
-                is_valid: false,
-                error: Some(format!(
-                    "Query contains mutation operation: {}",
-                    pattern.as_str()
-                )),
-                sanitized_query: String::new(),
-            };
+    let mask = mask_quoted(&sanitized);
+
+    if let Some(caps) = MUTATION_PREFIX.captures(&mask) {
+        let verb = caps.get(1).map(|m| m.as_str()).unwrap_or("that statement");
+        return reject(format!(
+            "Query starts with {verb}, which modifies data or session state. This server is read-only. Allowed: SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE, EXPLAIN, SET @var."
+        ));
+    }
+
+    if !ALLOWED_PATTERNS.iter().any(|p| p.is_match(&mask)) {
+        return reject(
+            "Query must start with SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE, DESC, EXPLAIN, SET @var, or a parenthesized SELECT/TABLE/VALUES/WITH."
+                .into(),
+        );
+    }
+
+    let set_writes_system = SET_SYSTEM_ASSIGN.is_match(&mask)
+        || SET_SCOPE.is_match(&SYSTEM_VAR_REF.replace_all(&mask, " "));
+    if SET_USER_VAR.is_match(&mask) && set_writes_system {
+        return reject(
+            "SET may only assign user variables (SET @var = ...). GLOBAL, SESSION and PERSIST scopes change server state and are not allowed."
+                .into(),
+        );
+    }
+
+    for (label, pattern) in DANGEROUS_CONSTRUCTS.iter() {
+        if pattern.is_match(&mask) {
+            return reject(format!(
+                "Query uses {label}, which locks rows or reads/writes server files. Remove it; plain SELECT is allowed, and SHOW CREATE TABLE gives schema."
+            ));
         }
     }
 
-    // Check if query starts with allowed pattern
-    let starts_with_allowed = ALLOWED_PATTERNS.iter().any(|p| p.is_match(&sanitized));
-    if !starts_with_allowed {
-        return SanitizeResult {
-            is_valid: false,
-            error: Some(
-                "Query must start with SELECT, SHOW, DESCRIBE, DESC, EXPLAIN, WITH, or SET @"
-                    .into(),
-            ),
-            sanitized_query: String::new(),
-        };
+    let embedded = EMBEDDED_WRITE
+        .find(&mask)
+        .map(|m| m.as_str().trim().to_string())
+        .or_else(|| {
+            EMBEDDED_CREATE
+                .captures_iter(&mask)
+                .find_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        });
+    if let Some(construct) = embedded {
+        return reject(format!(
+            "Query contains the write statement '{construct}'. This server is read-only. REPLACE(), INSERT() and TRUNCATE() as functions are allowed — only the statement forms are blocked."
+        ));
     }
 
-    // Check for dangerous keywords
-    let upper = sanitized.to_uppercase();
-    for keyword in DANGEROUS_KEYWORDS {
-        if upper.contains(keyword) {
-            return SanitizeResult {
-                is_valid: false,
-                error: Some(format!("Query contains dangerous keyword: {keyword}")),
-                sanitized_query: String::new(),
-            };
-        }
-    }
-
-    // Defense-in-depth: scan for DML keywords anywhere in the query (outside string literals)
-    let stripped = strip_string_literals(&sanitized);
-    for pattern in EMBEDDED_DML.iter() {
-        if pattern.is_match(&stripped) {
-            return SanitizeResult {
-                is_valid: false,
-                error: Some(format!(
-                    "Query contains forbidden keyword: {}",
-                    pattern.as_str()
-                )),
-                sanitized_query: String::new(),
-            };
-        }
-    }
-
-    // Check for multiple statements
-    if has_multiple_statements(&sanitized) {
-        return SanitizeResult {
-            is_valid: false,
-            error: Some("Multiple statements are not allowed".into()),
-            sanitized_query: String::new(),
-        };
+    if has_multiple_statements(&mask) {
+        return reject(
+            "Multiple statements are not allowed. Send one statement per call (a single trailing ';' is fine)."
+                .into(),
+        );
     }
 
     SanitizeResult {
@@ -163,20 +155,53 @@ pub fn sanitize(query: &str) -> SanitizeResult {
     }
 }
 
-/// Apply a LIMIT clause to SELECT queries that don't have one.
-pub fn apply_limit(query: &str, max_rows: u32) -> String {
-    if IS_SELECT.is_match(query) && !HAS_LIMIT.is_match(query) {
-        // Trim a trailing statement terminator before appending LIMIT, otherwise a
-        // query like `SELECT ... ;` becomes `SELECT ... ; LIMIT {n}`, which MySQL
-        // rejects with error 1064 (syntax error near 'LIMIT').
-        let trimmed = query.trim_end().trim_end_matches(';').trim_end();
-        format!("{trimmed} LIMIT {max_rows}")
-    } else {
-        query.to_string()
+fn reject(error: String) -> SanitizeResult {
+    SanitizeResult {
+        is_valid: false,
+        error: Some(error),
+        sanitized_query: String::new(),
     }
 }
 
-fn remove_comments(query: &str) -> String {
+/// Bound row-returning queries: append a LIMIT, or clamp one the caller supplied.
+pub fn apply_limit(query: &str, max_rows: u32) -> String {
+    let mask = mask_quoted(query);
+
+    if !LIMITABLE.is_match(&mask) {
+        return query.to_string();
+    }
+
+    let top_level_limit = LIMIT_KEYWORD
+        .find_iter(&mask)
+        .map(|m| m.start())
+        .filter(|start| {
+            let prefix = &mask[..*start];
+            prefix.matches('(').count() == prefix.matches(')').count()
+        })
+        .last();
+
+    let Some(start) = top_level_limit else {
+        let trimmed = query.trim_end().trim_end_matches(';').trim_end();
+        return format!("{trimmed} LIMIT {max_rows}");
+    };
+
+    // A non-numeric trailing LIMIT (`LIMIT ?`, `LIMIT @n`) is left alone: appending a
+    // second LIMIT would be a guaranteed syntax error.
+    let Some(caps) = TRAILING_LIMIT.captures(&mask[start..]) else {
+        return query.to_string();
+    };
+
+    let row_count = caps.get(2).or_else(|| caps.get(1)).unwrap();
+    if row_count.as_str().parse::<u64>().unwrap_or(u64::MAX) <= u64::from(max_rows) {
+        return query.to_string();
+    }
+
+    let from = start + row_count.start();
+    let to = start + row_count.end();
+    format!("{}{}{}", &query[..from], max_rows, &query[to..])
+}
+
+fn remove_comments(query: &str) -> Result<String, String> {
     let mut result = String::with_capacity(query.len());
     let chars: Vec<char> = query.chars().collect();
     let len = chars.len();
@@ -185,8 +210,8 @@ fn remove_comments(query: &str) -> String {
     let mut string_char = ' ';
 
     while i < len {
-        // Track string literals — don't strip comments inside them
-        if !in_string && (chars[i] == '\'' || chars[i] == '"') {
+        // Track quoted runs — don't strip comments inside them
+        if !in_string && (chars[i] == '\'' || chars[i] == '"' || chars[i] == '`') {
             in_string = true;
             string_char = chars[i];
             result.push(chars[i]);
@@ -194,8 +219,8 @@ fn remove_comments(query: &str) -> String {
             continue;
         }
         if in_string {
-            if chars[i] == '\\' && i + 1 < len {
-                // Escaped character — push both and skip
+            // Backslash is a literal character inside a backticked identifier.
+            if string_char != '`' && chars[i] == '\\' && i + 1 < len {
                 result.push(chars[i]);
                 result.push(chars[i + 1]);
                 i += 2;
@@ -209,8 +234,12 @@ fn remove_comments(query: &str) -> String {
             continue;
         }
 
-        // -- line comment
-        if i + 1 < len && chars[i] == '-' && chars[i + 1] == '-' {
+        // MySQL starts a -- comment only when followed by whitespace; `1--2` is arithmetic.
+        if i + 1 < len
+            && chars[i] == '-'
+            && chars[i + 1] == '-'
+            && (i + 2 >= len || chars[i + 2].is_whitespace() || chars[i + 2].is_control())
+        {
             while i < len && chars[i] != '\n' {
                 i += 1;
             }
@@ -223,53 +252,85 @@ fn remove_comments(query: &str) -> String {
             }
             continue;
         }
-        // /* block comment */
         if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
+            match chars.get(i + 2) {
+                // MySQL executes the body of a version-gated comment, so stripping it would
+                // change what the server runs.
+                Some('!') => {
+                    return Err("MySQL version-gated comments (/*! ... */) are not supported — their contents are executed by the server. Remove the comment and write the statement plainly. Optimizer hints (/*+ ... */) are allowed.".into());
+                }
+                Some('+') => {
+                    result.push(chars[i]);
+                    result.push(chars[i + 1]);
+                    i += 2;
+                    while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    if i + 1 < len {
+                        result.push(chars[i]);
+                        result.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        while i < len {
+                            result.push(chars[i]);
+                            i += 1;
+                        }
+                    }
+                    continue;
+                }
+                _ => {
+                    i += 2;
+                    while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i = if i + 1 < len { i + 2 } else { len };
+                    // A comment separates tokens: `x/**/FROM` must not fuse into `xFROM`.
+                    result.push(' ');
+                    continue;
+                }
             }
-            if i + 1 < len {
-                i += 2; // skip */
-            }
-            continue;
         }
         result.push(chars[i]);
         i += 1;
     }
 
-    result
+    Ok(result)
 }
 
-/// Remove the contents of string literals, leaving empty quotes, so that
-/// keyword scanning doesn't match text inside user-provided strings.
-fn strip_string_literals(query: &str) -> String {
+/// Blank the interior of every quoted run, keeping the delimiters and the byte length,
+/// so offsets found in the mask index the original query.
+fn mask_quoted(query: &str) -> String {
     let mut result = String::with_capacity(query.len());
     let chars: Vec<char> = query.chars().collect();
     let len = chars.len();
     let mut i = 0;
 
     while i < len {
-        if chars[i] == '\'' || chars[i] == '"' {
-            let quote = chars[i];
-            result.push(quote);
+        let delimiter = chars[i];
+        if delimiter != '\'' && delimiter != '"' && delimiter != '`' {
+            result.push(delimiter);
             i += 1;
-            while i < len {
-                if chars[i] == '\\' && i + 1 < len {
-                    i += 2; // skip escaped char
-                    continue;
-                }
-                if chars[i] == quote {
-                    break;
-                }
-                i += 1;
+            continue;
+        }
+
+        result.push(delimiter);
+        i += 1;
+        while i < len {
+            if delimiter != '`' && chars[i] == '\\' && i + 1 < len {
+                result.push(' ');
+                result.push_str(&" ".repeat(chars[i + 1].len_utf8()));
+                i += 2;
+                continue;
             }
-            if i < len {
-                result.push(quote); // closing quote
-                i += 1;
+            if chars[i] == delimiter {
+                break;
             }
-        } else {
-            result.push(chars[i]);
+            result.push_str(&" ".repeat(chars[i].len_utf8()));
+            i += 1;
+        }
+        if i < len {
+            result.push(delimiter);
             i += 1;
         }
     }
@@ -277,64 +338,45 @@ fn strip_string_literals(query: &str) -> String {
     result
 }
 
-fn has_multiple_statements(query: &str) -> bool {
-    let mut in_string = false;
-    let mut string_char = ' ';
-    let mut escaped = false;
-
-    let chars: Vec<char> = query.chars().collect();
-    let len = chars.len();
-
-    for i in 0..len {
-        let ch = chars[i];
-
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-
-        if !in_string && (ch == '"' || ch == '\'') {
-            in_string = true;
-            string_char = ch;
-        } else if in_string && ch == string_char {
-            in_string = false;
-        } else if !in_string && ch == ';' {
-            // Check if there's content after the semicolon
-            let remaining = query[i + 1..].trim();
-            if !remaining.is_empty() {
-                return true;
-            }
-        }
-    }
-
-    false
+fn has_multiple_statements(mask: &str) -> bool {
+    mask.match_indices(';')
+        .any(|(i, _)| !mask[i + 1..].trim().is_empty())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_limit, strip_string_literals};
+    use super::{apply_limit, mask_quoted};
 
     #[test]
-    fn strip_string_literals_redacts_quoted_content() {
-        assert_eq!(strip_string_literals("SELECT 'DROP TABLE'"), "SELECT ''");
-        assert_eq!(strip_string_literals(r"SELECT 'it\'s'"), "SELECT ''");
-        assert_eq!(strip_string_literals("SELECT \"DELETE\""), "SELECT \"\"");
+    fn mask_quoted_redacts_quoted_content() {
+        assert_eq!(mask_quoted("SELECT 'DROP TABLE'"), "SELECT '          '");
+        assert_eq!(mask_quoted("SELECT \"DELETE\""), "SELECT \"      \"");
+        assert_eq!(mask_quoted("SELECT `a;b`"), "SELECT `   `");
+        assert_eq!(mask_quoted(r"SELECT 'it\'s'"), "SELECT '     '");
+    }
+
+    #[test]
+    fn mask_quoted_preserves_byte_length() {
+        // The LIMIT rewrite splices by byte offset found in the mask.
+        let q = "SELECT * FROM t WHERE n = 'René' AND e = '🙂' LIMIT 5000000";
+        assert_eq!(mask_quoted(q).len(), q.len());
     }
 
     #[test]
     fn apply_limit_appends_to_bare_select() {
-        assert_eq!(apply_limit("SELECT * FROM t", 1000), "SELECT * FROM t LIMIT 1000");
+        assert_eq!(
+            apply_limit("SELECT * FROM t", 1000),
+            "SELECT * FROM t LIMIT 1000"
+        );
     }
 
     #[test]
     fn apply_limit_trims_trailing_semicolon() {
         // The bug this guards: `... ; LIMIT n` is a MySQL syntax error (1064).
-        assert_eq!(apply_limit("SELECT * FROM t;", 1000), "SELECT * FROM t LIMIT 1000");
+        assert_eq!(
+            apply_limit("SELECT * FROM t;", 1000),
+            "SELECT * FROM t LIMIT 1000"
+        );
         assert_eq!(
             apply_limit("SELECT id FROM t ORDER BY id ;", 1000),
             "SELECT id FROM t ORDER BY id LIMIT 1000"
@@ -343,8 +385,11 @@ mod tests {
 
     #[test]
     fn apply_limit_leaves_existing_limit_untouched() {
-        // Already limited: returned verbatim, trailing semicolon and all.
-        assert_eq!(apply_limit("SELECT * FROM t LIMIT 10;", 1000), "SELECT * FROM t LIMIT 10;");
+        // Already limited below the cap: returned verbatim, trailing semicolon and all.
+        assert_eq!(
+            apply_limit("SELECT * FROM t LIMIT 10;", 1000),
+            "SELECT * FROM t LIMIT 10;"
+        );
     }
 
     #[test]
