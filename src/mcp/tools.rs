@@ -15,6 +15,20 @@ use crate::config::Config;
 use crate::db::{PoolManager, row_to_json};
 use crate::sanitizer;
 
+/// MySQL's own error text, so a caller can correct the query without reading server logs.
+fn db_error_message(e: &sqlx::Error) -> String {
+    let Some(db_err) = e.as_database_error() else {
+        return e.to_string();
+    };
+    let code = db_err
+        .downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+        .number();
+    match db_err.code() {
+        Some(sqlstate) => format!("MySQL error {code} ({sqlstate}): {}", db_err.message()),
+        None => format!("MySQL error {code}: {}", db_err.message()),
+    }
+}
+
 fn safe_table_ident(raw: &str) -> Result<String, rmcp::ErrorData> {
     let table_name: String = raw
         .chars()
@@ -164,7 +178,7 @@ impl MysqlMcp {
             .map_err(|e| {
                 tracing::error!(error = %e, "SHOW TABLES query failed");
                 rmcp::ErrorData::internal_error(
-                    "Failed to list tables. Check server logs for details.".to_string(),
+                    format!("Failed to list tables: {}", db_error_message(&e)),
                     None,
                 )
             })?;
@@ -226,7 +240,8 @@ impl MysqlMcp {
                 tracing::error!(table = %table_name, error = %e, "DESCRIBE query failed");
                 rmcp::ErrorData::internal_error(
                     format!(
-                        "Failed to describe table '{table_name}'. Check server logs for details."
+                        "Failed to describe table '{table_name}': {}",
+                        db_error_message(&e)
                     ),
                     None,
                 )
@@ -356,11 +371,12 @@ impl MysqlMcp {
             }
             Ok(Err(e)) => {
                 tracing::error!(database = %p.database, error = %e, "Query execution failed");
+                let detail = db_error_message(&e);
                 Ok(serde_json::json!({
                     "success": false,
                     "database": p.database,
-                    "error": "Query execution failed",
-                    "message": "Query execution failed. Check server logs for details."
+                    "error": detail,
+                    "message": format!("Query execution failed: {detail}")
                 })
                 .to_string())
             }
