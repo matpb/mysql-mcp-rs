@@ -190,9 +190,9 @@ struct ExecuteQueryParams {
     /// Database name (e.g. "siku-local", "siku-dev", "siku-prod")
     database: String,
     /// SQL query. Read-only: must start with SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE/DESC,
-    /// EXPLAIN, SET @var, or a parenthesized SELECT/TABLE/VALUES/WITH. Write statements (anywhere,
-    /// not just first), INTO OUTFILE/DUMPFILE, FOR UPDATE/SHARE, LOCK IN SHARE MODE, LOAD_FILE(),
-    /// SET GLOBAL/SESSION, /*! ... */ comments and multiple statements are rejected.
+    /// EXPLAIN, or a parenthesized SELECT/TABLE/VALUES/WITH. Write statements (anywhere, not just
+    /// first), SET in every form, INTO OUTFILE/DUMPFILE, FOR UPDATE/SHARE, LOCK IN SHARE MODE,
+    /// LOAD_FILE(), GET_LOCK(), /*! ... */ comments and multiple statements are rejected.
     /// A missing LIMIT is added and a larger one clamped to the server row cap (default 1000);
     /// "truncated" reports whether more rows matched.
     /// Result encoding: data[] is one flat {column: value} object per row; columns[] carries the true
@@ -406,19 +406,20 @@ impl MysqlMcp {
         name = "execute_query",
         description = "Run ONE read-only SQL query.\n\
             ACCEPTED: a statement starting with SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE/DESC, \
-            EXPLAIN, SET @var, or a parenthesized SELECT/TABLE/VALUES/WITH.\n\
+            EXPLAIN, or a parenthesized SELECT/TABLE/VALUES/WITH.\n\
             REJECTED, at the start or nested anywhere: INSERT, UPDATE, DELETE, DROP, ALTER, RENAME, \
             GRANT, REVOKE, CREATE (SHOW CREATE is fine), REPLACE ... INTO, TRUNCATE TABLE, LOAD \
             DATA/XML; FLUSH, LOCK, UNLOCK, CALL and transaction control (BEGIN, START TRANSACTION, \
             COMMIT, ROLLBACK, SAVEPOINT); INTO OUTFILE, INTO DUMPFILE, FOR UPDATE, FOR SHARE, LOCK \
-            IN SHARE MODE, LOAD_FILE(); SET GLOBAL/SESSION/PERSIST (only SET @var is allowed); more \
+            IN SHARE MODE, LOAD_FILE(), GET_LOCK()/RELEASE_LOCK(); SET in EVERY form, including \
+            SET @var, SET @@var and any @@variable assignment, since each mutates state on a pooled \
+            connection the next caller inherits; DO, PREPARE/EXECUTE, HANDLER, XA, RESET, INSTALL; more \
             than one statement (one trailing ';' is fine); and /*! version-gated */ comments, whose \
             body MySQL would execute. The keyword scan ignores anything inside '...', \"...\" and \
             `...`, so REPLACE()/INSERT()/TRUNCATE() as functions and a column named `delete` pass. \
             Ordinary comments (--, #, /* */) are stripped; optimizer hints (/*+ ... */) are kept.\n\
-            SET @var is accepted but nearly useless here: multi-statement is blocked, so it cannot be \
-            set and read in one call, and the next call may land on a different pooled connection. \
-            Use a subquery or a CTE instead.\n\
+            Reading @@variables is fine (SELECT @@version); assigning one is not. Inline values or \
+            use a CTE instead of a session variable.\n\
             ROWS: SELECT/WITH/TABLE/VALUES get a LIMIT appended, and a larger LIMIT of your own is \
             clamped, to the server row cap (DEFAULT_MAX_ROWS, default 1000); SHOW and EXPLAIN results \
             are cut to the same cap afterwards. \"truncated\": true means more rows matched than were \

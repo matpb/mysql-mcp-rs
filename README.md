@@ -166,7 +166,7 @@ Executes a read-only SQL query.
 
 ### What is allowed
 
-A statement must begin with `SELECT`, `WITH`, `TABLE`, `VALUES`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN`, `SET @var`, or a parenthesized `SELECT`/`TABLE`/`VALUES`/`WITH` — so `(SELECT a FROM t1) UNION (SELECT b FROM t2)` is accepted.
+A statement must begin with `SELECT`, `WITH`, `TABLE`, `VALUES`, `SHOW`, `DESCRIBE`, `DESC`, `EXPLAIN`, or a parenthesized `SELECT`/`TABLE`/`VALUES`/`WITH` — so `(SELECT a FROM t1) UNION (SELECT b FROM t2)` is accepted.
 
 Only one statement per call; a single trailing `;` is fine.
 
@@ -174,11 +174,9 @@ Only one statement per call; a single trailing `;` is fine.
 
 Rejected: mutation statements anywhere in the query, `INTO OUTFILE`, `INTO DUMPFILE`, `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, and `LOAD_FILE()`. Rejection messages name the offending construct and the way forward — they never hand back a regex.
 
-### `SET @var` is single-statement-scoped, and therefore near-useless
+### `SET` is rejected in every form
 
-`SET @var = ...` passes the gate, but each `execute_query` call runs on a pooled connection that is not pinned to your session and the next call may land on a different one. A variable set in one call is **not** visible to the next, and because only one statement is allowed per call you cannot set and read it together. Treat it as accepted-but-inert; inline the value or use a CTE instead.
-
-`SET` may only assign user variables. `GLOBAL`, `SESSION`, `LOCAL`, `PERSIST` and `PERSIST_ONLY` scopes are rejected, including in a mixed assignment list such as `SET @a = 1, GLOBAL general_log = 1`.
+No `SET` statement is accepted — not `SET @var`, not `SET @@var`, not a scope keyword. Every connection is pooled and the next caller inherits whatever a `SET` left behind, so a session variable, time zone or `sql_mode` change would silently alter someone else's results. Assigning a `@@variable` anywhere in a statement is rejected for the same reason. Reading one (`SELECT @@version`) is fine. Inline the value or use a CTE.
 
 ### Comments
 
@@ -191,7 +189,7 @@ Two exceptions:
 
 ### Automatic LIMIT
 
-Every `SELECT`, `WITH` (CTE), `TABLE` and parenthesized set operation is bounded by `DEFAULT_MAX_ROWS`. `SHOW`, `DESCRIBE`, `EXPLAIN`, `VALUES` and `SET @` are deliberately excluded — most `SHOW` forms reject a `LIMIT` clause, and on `EXPLAIN` a `LIMIT` would bind to the inner `SELECT` and change the plan being explained.
+Every `SELECT`, `WITH` (CTE), `TABLE` and parenthesized set operation is bounded by `DEFAULT_MAX_ROWS`. `SHOW`, `DESCRIBE`, `EXPLAIN`, `VALUES` are deliberately excluded — most `SHOW` forms reject a `LIMIT` clause, and on `EXPLAIN` a `LIMIT` would bind to the inner `SELECT` and change the plan being explained.
 
 The cap is applied against a copy of the query with quoted text blanked out, and only a `LIMIT` that is **trailing and at paren depth 0** counts as yours:
 

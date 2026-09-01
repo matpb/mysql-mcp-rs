@@ -57,9 +57,9 @@ fn for_update_blocked() {
 }
 
 #[test]
-fn set_session_var_allowed() {
+fn set_user_var_blocked() {
     let r = sanitize("SET @foo = 1");
-    assert!(r.is_valid);
+    assert!(!r.is_valid);
 }
 
 #[test]
@@ -691,15 +691,59 @@ fn set_bare_system_var_blocked() {
 }
 
 #[test]
-fn set_user_var_reading_system_var_allowed() {
-    assert!(sanitize("SET @x = @@session.sql_mode").is_valid);
-    assert!(sanitize("SET @x = @@global.max_connections").is_valid);
-}
-
-#[test]
 fn block_comment_separates_tokens() {
     assert_eq!(
         sanitize("SELECT 1 AS x/**/FROM DUAL").sanitized_query,
         "SELECT 1 AS x FROM DUAL"
     );
+}
+
+// --- SET is not a read-only statement in any form ---
+
+#[test]
+fn every_set_form_blocked() {
+    for q in [
+        "SET @foo = 1",
+        "SET @foo := 1",
+        "SET @@time_zone = '+05:00'",
+        "SET @@session.sql_mode = ''",
+        "SET @@GLOBAL.max_connections = 1",
+        "SET SESSION TRANSACTION READ WRITE",
+        "SET NAMES utf8mb4",
+        "SET autocommit = 1",
+        "  set   @x = 1",
+        "/* c */ SET @x = 1",
+    ] {
+        assert!(!sanitize(q).is_valid, "should be blocked: {q}");
+    }
+}
+
+#[test]
+fn system_variable_assignment_blocked_anywhere() {
+    assert!(!sanitize("SELECT @@max_execution_time := 0").is_valid);
+    assert!(sanitize("SELECT @@max_execution_time AS t").is_valid);
+    assert!(sanitize("SELECT * FROM t WHERE x = @@version").is_valid);
+}
+
+#[test]
+fn advisory_lock_functions_blocked() {
+    assert!(!sanitize("SELECT GET_LOCK('x', 10)").is_valid);
+    assert!(!sanitize("SELECT RELEASE_LOCK('x')").is_valid);
+    assert!(!sanitize("SELECT RELEASE_ALL_LOCKS()").is_valid);
+}
+
+#[test]
+fn statement_control_verbs_blocked() {
+    for q in [
+        "DO SLEEP(5)",
+        "PREPARE s FROM 'SELECT 1'",
+        "EXECUTE s",
+        "DEALLOCATE PREPARE s",
+        "HANDLER t OPEN",
+        "XA START 'x'",
+        "RESET MASTER",
+        "INSTALL PLUGIN x SONAME 'y.so'",
+    ] {
+        assert!(!sanitize(q).is_valid, "should be blocked: {q}");
+    }
 }

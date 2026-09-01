@@ -12,7 +12,7 @@ pub struct SanitizeResult {
 
 static MUTATION_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)^\s*(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|RENAME|REPLACE|LOAD|GRANT|REVOKE|FLUSH|LOCK|UNLOCK|CALL|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT)\b",
+        r"(?i)^\s*(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|RENAME|REPLACE|LOAD|GRANT|REVOKE|FLUSH|RESET|LOCK|UNLOCK|CALL|DO|HANDLER|SET|XA|PREPARE|EXECUTE|DEALLOCATE|INSTALL|UNINSTALL|BINLOG|IMPORT|START\s+TRANSACTION|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT)\b",
     )
     .unwrap()
 });
@@ -25,7 +25,6 @@ static ALLOWED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?i)^\s*DESC\s+",
         r"(?i)^\s*EXPLAIN\s+",
         r"(?i)^\s*WITH\s+",
-        r"(?i)^\s*SET\s+@",
         r"(?i)^\s*TABLE\s+",
         r"(?i)^\s*VALUES\s+",
         r"(?i)^\s*\(\s*(?:\(\s*)*(?:SELECT|TABLE|VALUES|WITH)\b",
@@ -35,17 +34,9 @@ static ALLOWED_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
-static SET_USER_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*SET\s+@").unwrap());
-static SET_SCOPE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:GLOBAL|PERSIST_ONLY|PERSIST|SESSION|LOCAL)\b").unwrap());
-
-/// `SET @@x = 1` is a session write that names no scope keyword.
-static SET_SYSTEM_ASSIGN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@@[A-Za-z0-9_.$]*\s*=").unwrap());
-
-/// A `@@var` reference, so the scope scan cannot fire on the read side of `SET @x = @@session.y`.
-static SYSTEM_VAR_REF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@@[A-Za-z0-9_.$]*").unwrap());
+/// `SELECT @@x := 1` mutates the pooled connection the next caller inherits. Reading is fine.
+static SYSTEM_VAR_ASSIGN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@@[A-Za-z0-9_.$]*\s*(?::=|=[^=])").unwrap());
 
 static DANGEROUS_CONSTRUCTS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     [
@@ -55,6 +46,13 @@ static DANGEROUS_CONSTRUCTS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::ne
         ("FOR SHARE", r"(?i)\bFOR\s+SHARE\b"),
         ("LOCK IN SHARE MODE", r"(?i)\bLOCK\s+IN\s+SHARE\s+MODE\b"),
         ("LOAD_FILE()", r"(?i)\bLOAD_FILE\s*\("),
+        ("GET_LOCK()", r"(?i)\bGET_LOCK\s*\("),
+        ("RELEASE_LOCK()", r"(?i)\bRELEASE_LOCK\s*\("),
+        ("RELEASE_ALL_LOCKS()", r"(?i)\bRELEASE_ALL_LOCKS\s*\("),
+        (
+            "a system-variable assignment",
+            r"@@[A-Za-z0-9_.$]*\s*(?::=|=[^=])",
+        ),
     ]
     .iter()
     .map(|(label, p)| (*label, Regex::new(p).unwrap()))
@@ -99,22 +97,20 @@ pub fn sanitize(query: &str) -> SanitizeResult {
     if let Some(caps) = MUTATION_PREFIX.captures(&mask) {
         let verb = caps.get(1).map(|m| m.as_str()).unwrap_or("that statement");
         return reject(format!(
-            "Query starts with {verb}, which modifies data or session state. This server is read-only. Allowed: SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE, EXPLAIN, SET @var."
+            "Query starts with {verb}, which modifies data or session state. This server is read-only. Allowed: SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE, EXPLAIN."
         ));
     }
 
     if !ALLOWED_PATTERNS.iter().any(|p| p.is_match(&mask)) {
         return reject(
-            "Query must start with SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE, DESC, EXPLAIN, SET @var, or a parenthesized SELECT/TABLE/VALUES/WITH."
+            "Query must start with SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE, DESC, EXPLAIN, or a parenthesized SELECT/TABLE/VALUES/WITH."
                 .into(),
         );
     }
 
-    let set_writes_system = SET_SYSTEM_ASSIGN.is_match(&mask)
-        || SET_SCOPE.is_match(&SYSTEM_VAR_REF.replace_all(&mask, " "));
-    if SET_USER_VAR.is_match(&mask) && set_writes_system {
+    if SYSTEM_VAR_ASSIGN.is_match(&mask) {
         return reject(
-            "SET may only assign user variables (SET @var = ...). GLOBAL, SESSION and PERSIST scopes change server state and are not allowed."
+            "Query assigns a @@system variable, which changes state on a pooled connection the next caller inherits. Reading one (SELECT @@version) is allowed."
                 .into(),
         );
     }
