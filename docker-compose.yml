@@ -4,7 +4,7 @@ services:
     container_name: mysql-mcp
     restart: unless-stopped
     ports:
-      - "${MCP_PORT:-8431}:8431"
+      - "127.0.0.1:${MCP_PORT:-8431}:8431"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
