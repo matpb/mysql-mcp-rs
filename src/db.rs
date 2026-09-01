@@ -137,7 +137,9 @@ pub fn row_to_json(row: &MySqlRow) -> serde_json::Value {
             col.type_info().name()
         );
 
-        let value = mysql_value_to_json(row, &name, &type_name);
+        // Look up by ordinal, not name: sqlx cannot resolve EXPLAIN column names, which made
+        // every field decode as the "[binary:...]" placeholder.
+        let value = mysql_value_to_json(row, col.ordinal(), &type_name);
         map.insert(name, value);
     }
 
@@ -145,27 +147,27 @@ pub fn row_to_json(row: &MySqlRow) -> serde_json::Value {
 }
 
 /// JSON number for MySQL unsigned integer columns (sqlx uses u32/u16/u8 depending on width).
-fn unsigned_integer_to_json(row: &MySqlRow, name: &str) -> serde_json::Value {
-    if let Ok(Some(v)) = row.try_get::<Option<u32>, _>(name) {
+fn unsigned_integer_to_json(row: &MySqlRow, idx: usize) -> serde_json::Value {
+    if let Ok(Some(v)) = row.try_get::<Option<u32>, _>(idx) {
         return serde_json::Value::Number(v.into());
     }
-    if let Ok(Some(v)) = row.try_get::<Option<u16>, _>(name) {
+    if let Ok(Some(v)) = row.try_get::<Option<u16>, _>(idx) {
         return serde_json::Value::Number(v.into());
     }
-    if let Ok(Some(v)) = row.try_get::<Option<u8>, _>(name) {
+    if let Ok(Some(v)) = row.try_get::<Option<u8>, _>(idx) {
         return serde_json::Value::Number(v.into());
     }
     serde_json::Value::Null
 }
 
-fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_json::Value {
+fn mysql_value_to_json(row: &MySqlRow, idx: usize, type_name: &str) -> serde_json::Value {
     if type_name == "NULL" {
         return serde_json::Value::Null;
     }
 
     if type_name == "BOOLEAN" || type_name == "BOOL" || type_name == "TINYINT(1)" {
         return row
-            .try_get::<Option<bool>, _>(name)
+            .try_get::<Option<bool>, _>(idx)
             .ok()
             .flatten()
             .map(serde_json::Value::Bool)
@@ -174,7 +176,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
 
     if type_name == "JSON" {
         return row
-            .try_get::<Option<serde_json::Value>, _>(name)
+            .try_get::<Option<serde_json::Value>, _>(idx)
             .ok()
             .flatten()
             .unwrap_or(serde_json::Value::Null);
@@ -182,7 +184,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
 
     if type_name.starts_with("BIGINT UNSIGNED") {
         return row
-            .try_get::<Option<u64>, _>(name)
+            .try_get::<Option<u64>, _>(idx)
             .ok()
             .flatten()
             .map(|v| serde_json::Value::String(v.to_string()))
@@ -193,7 +195,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
     // u32 by sqlx, not i64, and would incorrectly fall through as null.
     if type_name.starts_with("BIGINT") {
         return row
-            .try_get::<Option<i64>, _>(name)
+            .try_get::<Option<i64>, _>(idx)
             .ok()
             .flatten()
             .map(|v| serde_json::Value::Number(v.into()))
@@ -208,7 +210,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
             || type_name.starts_with("INT")
             || type_name.starts_with("INTEGER"))
     {
-        return unsigned_integer_to_json(row, name);
+        return unsigned_integer_to_json(row, idx);
     }
 
     if type_name.starts_with("TINYINT")
@@ -218,7 +220,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
         || type_name.starts_with("INTEGER")
     {
         return row
-            .try_get::<Option<i32>, _>(name)
+            .try_get::<Option<i32>, _>(idx)
             .ok()
             .flatten()
             .map(|v| serde_json::Value::Number(v.into()))
@@ -227,7 +229,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
 
     if type_name.starts_with("FLOAT") {
         return row
-            .try_get::<Option<f32>, _>(name)
+            .try_get::<Option<f32>, _>(idx)
             .ok()
             .flatten()
             .and_then(|v| serde_json::Number::from_f64(f64::from(v)))
@@ -237,7 +239,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
 
     if type_name.starts_with("DOUBLE") {
         return row
-            .try_get::<Option<f64>, _>(name)
+            .try_get::<Option<f64>, _>(idx)
             .ok()
             .flatten()
             .and_then(serde_json::Number::from_f64)
@@ -248,7 +250,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
     if type_name.starts_with("DECIMAL") || type_name.starts_with("NUMERIC") {
         use rust_decimal::prelude::ToPrimitive;
         return row
-            .try_get::<Option<Decimal>, _>(name)
+            .try_get::<Option<Decimal>, _>(idx)
             .ok()
             .flatten()
             .map(|d| {
@@ -261,24 +263,24 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
     }
 
     if type_name.starts_with("TIMESTAMP") {
-        return match row.try_get::<Option<DateTime<Utc>>, _>(name) {
+        return match row.try_get::<Option<DateTime<Utc>>, _>(idx) {
             Ok(opt) => opt
                 .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
                 .unwrap_or(serde_json::Value::Null),
             Err(e) => {
-                tracing::warn!("Failed to decode {name} (type={type_name}): {e:?}");
+                tracing::warn!("Failed to decode column {idx} (type={type_name}): {e:?}");
                 serde_json::Value::Null
             }
         };
     }
 
     if type_name.starts_with("DATETIME") {
-        return match row.try_get::<Option<NaiveDateTime>, _>(name) {
+        return match row.try_get::<Option<NaiveDateTime>, _>(idx) {
             Ok(opt) => opt
                 .map(|dt| serde_json::Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()))
                 .unwrap_or(serde_json::Value::Null),
             Err(e) => {
-                tracing::warn!("Failed to decode {name} (type={type_name}): {e:?}");
+                tracing::warn!("Failed to decode column {idx} (type={type_name}): {e:?}");
                 serde_json::Value::Null
             }
         };
@@ -286,7 +288,7 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
 
     if type_name.starts_with("DATE") {
         return row
-            .try_get::<Option<NaiveDate>, _>(name)
+            .try_get::<Option<NaiveDate>, _>(idx)
             .ok()
             .flatten()
             .map(|d| serde_json::Value::String(d.format("%Y-%m-%d").to_string()))
@@ -295,22 +297,22 @@ fn mysql_value_to_json(row: &MySqlRow, name: &str, type_name: &str) -> serde_jso
 
     if type_name.starts_with("TIME") {
         return row
-            .try_get::<Option<NaiveTime>, _>(name)
+            .try_get::<Option<NaiveTime>, _>(idx)
             .ok()
             .flatten()
             .map(|t| serde_json::Value::String(t.format("%H:%M:%S").to_string()))
             .unwrap_or(serde_json::Value::Null);
     }
 
-    string_or_binary_fallback(row, name, type_name)
+    string_or_binary_fallback(row, idx, type_name)
 }
 
 /// VARCHAR/TEXT/ENUM/BLOB and unknown types: prefer UTF-8 string, then hex, then a placeholder.
-fn string_or_binary_fallback(row: &MySqlRow, name: &str, type_name: &str) -> serde_json::Value {
-    match row.try_get::<Option<String>, _>(name) {
+fn string_or_binary_fallback(row: &MySqlRow, idx: usize, type_name: &str) -> serde_json::Value {
+    match row.try_get::<Option<String>, _>(idx) {
         Ok(Some(s)) => serde_json::Value::String(s),
         Ok(None) => serde_json::Value::Null,
-        Err(_) => match row.try_get::<Option<Vec<u8>>, _>(name) {
+        Err(_) => match row.try_get::<Option<Vec<u8>>, _>(idx) {
             Ok(Some(v)) => match String::from_utf8(v.clone()) {
                 Ok(s) => serde_json::Value::String(s),
                 Err(_) => hex_prefix_string(&v),
