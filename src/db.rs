@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Timelike, Utc};
 use serde_json::{Map, Number, Value};
 use sqlx::mysql::types::{MySqlTime, MySqlTimeSign};
-use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::{Column, Executor, Row, TypeInfo};
 
 use crate::config::{Config, DatabaseConfig};
@@ -52,12 +52,14 @@ impl PoolManager {
     }
 
     async fn try_connect(db_config: &DatabaseConfig) -> Result<MySqlPool, String> {
+        // Required, not verified: MySQL 5.7's auto-generated cert is self-signed.
         let opts = MySqlConnectOptions::new()
             .host(&db_config.host)
             .port(db_config.port)
             .username(&db_config.user)
             .password(&db_config.password)
-            .database(&db_config.database);
+            .database(&db_config.database)
+            .ssl_mode(MySqlSslMode::Required);
 
         let max_execution_ms = db_config.query_timeout_secs.saturating_mul(1000);
 
