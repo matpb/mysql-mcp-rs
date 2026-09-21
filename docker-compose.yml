@@ -12,3 +12,4 @@ services:
       MCP_PORT: "8431"
       RUST_LOG: "${RUST_LOG:-mysql_mcp=info}"
       MYSQL_DATABASES: '${MYSQL_DATABASES}'
+      API_KEYS: "${API_KEYS:-}"

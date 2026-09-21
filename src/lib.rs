@@ -2,6 +2,7 @@
 //!
 //! The binary entrypoint is thin; use [`run`] to start the HTTP server programmatically.
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod mcp;
@@ -9,4 +10,4 @@ pub mod sanitizer;
 
 mod server;
 
-pub use server::run;
+pub use server::{build_router, run};

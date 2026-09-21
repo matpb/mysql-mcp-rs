@@ -11,6 +11,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
+use crate::auth;
 use crate::config::Config;
 use crate::db::PoolManager;
 use crate::mcp::tools::MysqlMcp;
@@ -51,17 +52,12 @@ async fn connect(cfg: &Config) -> Arc<PoolManager> {
     Arc::new(PoolManager::new(cfg).await)
 }
 
-/// Starts tracing, loads config, connects to MySQL, and serves MCP over HTTP until shutdown.
-async fn run_http() {
-    init_tracing(false);
-
-    let cfg = Config::from_env();
-    let pool_manager = connect(&cfg).await;
-
-    let mcp_pool = pool_manager.clone();
+/// Builds the router `run_http` serves: `/health` unauthenticated, `/mcp` gated by
+/// `Config::api_keys` when non-empty.
+pub fn build_router(cfg: &Config, pool_manager: Arc<PoolManager>) -> axum::Router {
     let mcp_cfg = cfg.clone();
     let mcp_service = StreamableHttpService::new(
-        move || Ok(MysqlMcp::new(mcp_pool.clone(), mcp_cfg.clone())),
+        move || Ok(MysqlMcp::new(pool_manager.clone(), mcp_cfg.clone())),
         Arc::new(NeverSessionManager::default()),
         StreamableHttpServerConfig {
             stateful_mode: false,
@@ -70,18 +66,40 @@ async fn run_http() {
         },
     );
 
-    // Permissive CORS: MCP clients (IDEs, CLI tools, web UIs) use varied origins.
-    // Safe only because the default bind is loopback; there is no authentication.
-    let app = axum::Router::new()
-        .route("/health", axum::routing::get(health))
+    let mcp_route = axum::Router::new()
         .route("/mcp", axum::routing::any_service(mcp_service))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::new(cfg.api_keys.clone()),
+            auth::require_api_key,
+        ));
+
+    // Permissive CORS: MCP clients (IDEs, CLI tools, web UIs) use varied origins.
+    // Auth is optional via API_KEYS; loopback bind is still the default guard.
+    axum::Router::new()
+        .route("/health", axum::routing::get(health))
+        .merge(mcp_route)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+}
+
+/// Starts tracing, loads config, connects to MySQL, and serves MCP over HTTP until shutdown.
+async fn run_http() {
+    init_tracing(false);
+
+    let cfg = Config::from_env();
+    let pool_manager = connect(&cfg).await;
+
+    let app = build_router(&cfg, pool_manager.clone());
 
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();
     tracing::info!("MySQL MCP server listening on {addr}");
-    if !addr.ip().is_loopback() {
+    if cfg.auth_enabled() {
+        tracing::info!(
+            "API key authentication enabled with {} key(s)",
+            cfg.api_keys.len()
+        );
+    } else if !addr.ip().is_loopback() {
         tracing::warn!(
             "MCP_HOST={} exposes an unauthenticated server beyond loopback; put it behind a firewall, VPN or authenticating proxy",
             addr.ip()

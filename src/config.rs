@@ -47,7 +47,7 @@ fn default_max_binary_preview_bytes() -> usize {
     256
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -57,6 +57,31 @@ pub struct Config {
     pub max_value_bytes: usize,
     /// Source-byte cap on a binary value before its hex preview is truncated.
     pub max_binary_preview_bytes: usize,
+    /// HTTP API keys; empty means auth is disabled. Ignored in stdio mode.
+    pub api_keys: Vec<String>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("databases", &self.databases)
+            .field("default_max_rows", &self.default_max_rows)
+            .field("max_value_bytes", &self.max_value_bytes)
+            .field("max_binary_preview_bytes", &self.max_binary_preview_bytes)
+            .field("api_keys", &format!("[{} key(s)]", self.api_keys.len()))
+            .finish()
+    }
+}
+
+/// Splits `API_KEYS` on `,`, trims each entry, and drops empties.
+pub fn parse_api_keys(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Parses the JSON array used for the `MYSQL_DATABASES` environment variable.
@@ -129,6 +154,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(default_max_binary_preview_bytes),
+            api_keys: env::var("API_KEYS")
+                .ok()
+                .map(|raw| parse_api_keys(&raw))
+                .unwrap_or_default(),
             ..cfg
         }
     }
@@ -147,11 +176,16 @@ impl Config {
             default_max_rows,
             max_value_bytes: default_max_value_bytes(),
             max_binary_preview_bytes: default_max_binary_preview_bytes(),
+            api_keys: vec![],
         }
     }
 
     pub fn database_names(&self) -> Vec<&str> {
         self.databases.iter().map(|d| d.name.as_str()).collect()
+    }
+
+    pub fn auth_enabled(&self) -> bool {
+        !self.api_keys.is_empty()
     }
 }
 
@@ -260,5 +294,25 @@ mod tests {
         let s = format!("{db:?}");
         assert!(!s.contains("secret"));
         assert!(s.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn parse_api_keys_trims_and_drops_empties() {
+        let keys = parse_api_keys(" a , b,,  c ,");
+        assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_api_keys_empty_string_gives_empty_vec() {
+        assert!(parse_api_keys("").is_empty());
+    }
+
+    #[test]
+    fn config_debug_does_not_leak_configured_key() {
+        let mut cfg = Config::from_parts("127.0.0.1", 8431, vec![], 1000);
+        cfg.api_keys = vec!["super-secret-key".into()];
+        let s = format!("{cfg:?}");
+        assert!(!s.contains("super-secret-key"));
+        assert!(s.contains("[1 key(s)]"));
     }
 }

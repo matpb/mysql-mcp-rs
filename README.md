@@ -102,6 +102,22 @@ The HTTP server starts on `http://127.0.0.1:8431` by default. `mysql-mcp --help`
 
 `mysql-mcp` or `mysql-mcp http` serves streamable HTTP at `/mcp`, stateless, with a `GET /health` probe. Logs go to stdout.
 
+### Authentication
+
+Set `API_KEYS` (comma-separated, trimmed, empty entries dropped) to require an API key on every `/mcp` request — useful when deploying to Cloud Run. `GET /health` always stays open for the platform's health probe.
+
+Send the key either as `X-API-Key: <key>` or `Authorization: Bearer <key>`. A missing or wrong key gets `401` with a `WWW-Authenticate: Bearer` header and a JSON body:
+
+```json
+{"error": "unauthorized", "message": "missing or invalid API key; send it in the X-API-Key header"}
+```
+
+```bash
+curl -H "X-API-Key: $API_KEY" http://localhost:8431/mcp
+```
+
+Leaving `API_KEYS` unset or empty keeps the old behaviour: no authentication at all.
+
 ### stdio
 
 `mysql-mcp stdio` serves one MCP session over stdin/stdout, for clients that spawn the binary themselves. **Logs go to stderr** — stdout carries the JSON-RPC framing and nothing else.
@@ -131,8 +147,9 @@ The HTTP server starts on `http://127.0.0.1:8431` by default. `mysql-mcp --help`
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MYSQL_DATABASES` | *required* | JSON array of database configs (or use the flat `MYSQL_*` form above) |
-| `MCP_HOST` | `127.0.0.1` | HTTP bind address. There is no authentication — see [Security Model](#security-model) |
+| `MCP_HOST` | `127.0.0.1` | HTTP bind address. There is no authentication unless `API_KEYS` is set — see [Security Model](#security-model) |
 | `MCP_PORT` | `8431` | HTTP port |
+| `API_KEYS` | *(empty)* | Comma-separated list of API keys required on `/mcp` over HTTP. Empty disables auth. Ignored in stdio mode |
 | `DEFAULT_MAX_ROWS` | `1000` | Row cap applied to every limitable query |
 | `MAX_VALUE_BYTES` | `4096` | Byte cap on a single text or JSON value before truncation |
 | `MAX_BINARY_PREVIEW_BYTES` | `256` | Source-byte cap on a binary value's hex preview |
