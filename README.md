@@ -54,6 +54,7 @@ Each database entry supports:
 | `database` | yes | — | MySQL schema/database name |
 | `max_connections` | no | `5` | Connection pool size |
 | `query_timeout_secs` | no | `30` | Query timeout in seconds |
+| `ssl_mode` | no | `required` | `disabled` \| `preferred` \| `required`; use `disabled` behind cloud-sql-proxy, which already encrypts to Cloud SQL |
 
 If `MYSQL_DATABASES` is malformed, startup fails with serde's own message rather than a generic "invalid JSON":
 
@@ -75,6 +76,7 @@ For one database — typically a stdio client whose config file holds a plain en
 | `MYSQL_NAME` | value of `MYSQL_DATABASE` | Friendly name used in MCP tool calls |
 | `MYSQL_MAX_CONNECTIONS` | `5` | Connection pool size |
 | `MYSQL_QUERY_TIMEOUT_SECS` | `30` | Query timeout in seconds |
+| `MYSQL_SSL_MODE` | `required` | `disabled` \| `preferred` \| `required` |
 
 `MYSQL_DATABASES` wins when both are set.
 

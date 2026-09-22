@@ -8,7 +8,7 @@ use sqlx::mysql::types::{MySqlTime, MySqlTimeSign};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::{Column, Executor, Row, TypeInfo};
 
-use crate::config::{Config, DatabaseConfig};
+use crate::config::{Config, DatabaseConfig, SslMode};
 
 /// Largest integer a JSON consumer can hold in an f64 without loss (2^53 - 1).
 const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
@@ -52,14 +52,19 @@ impl PoolManager {
     }
 
     async fn try_connect(db_config: &DatabaseConfig) -> Result<MySqlPool, String> {
-        // Required, not verified: MySQL 5.7's auto-generated cert is self-signed.
+        // Default Required, not verified: MySQL 5.7's auto-generated cert is self-signed.
+        let ssl_mode = match db_config.ssl_mode {
+            SslMode::Disabled => MySqlSslMode::Disabled,
+            SslMode::Preferred => MySqlSslMode::Preferred,
+            SslMode::Required => MySqlSslMode::Required,
+        };
         let opts = MySqlConnectOptions::new()
             .host(&db_config.host)
             .port(db_config.port)
             .username(&db_config.user)
             .password(&db_config.password)
             .database(&db_config.database)
-            .ssl_mode(MySqlSslMode::Required);
+            .ssl_mode(ssl_mode);
 
         let max_execution_ms = db_config.query_timeout_secs.saturating_mul(1000);
 

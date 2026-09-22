@@ -2,6 +2,33 @@ use serde::Deserialize;
 use std::env;
 use std::fmt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SslMode {
+    Disabled,
+    Preferred,
+    Required,
+}
+
+impl std::str::FromStr for SslMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "disabled" => Ok(SslMode::Disabled),
+            "preferred" => Ok(SslMode::Preferred),
+            "required" => Ok(SslMode::Required),
+            other => Err(format!(
+                "invalid ssl_mode `{other}`: expected disabled, preferred, or required"
+            )),
+        }
+    }
+}
+
+fn default_ssl_mode() -> SslMode {
+    SslMode::Required
+}
+
 #[derive(Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub name: String,
@@ -14,6 +41,8 @@ pub struct DatabaseConfig {
     pub max_connections: u32,
     #[serde(default = "default_query_timeout")]
     pub query_timeout_secs: u64,
+    #[serde(default = "default_ssl_mode")]
+    pub ssl_mode: SslMode,
 }
 
 impl fmt::Debug for DatabaseConfig {
@@ -27,6 +56,7 @@ impl fmt::Debug for DatabaseConfig {
             .field("database", &self.database)
             .field("max_connections", &self.max_connections)
             .field("query_timeout_secs", &self.query_timeout_secs)
+            .field("ssl_mode", &self.ssl_mode)
             .finish()
     }
 }
@@ -100,6 +130,12 @@ pub fn load_databases_from_json(json: &str) -> Result<Vec<DatabaseConfig>, Strin
 /// a stdio client whose config file holds a plain env map rather than JSON.
 pub fn load_single_database_from_env() -> Option<DatabaseConfig> {
     let database = env::var("MYSQL_DATABASE").ok()?;
+    let ssl_mode = match env::var("MYSQL_SSL_MODE") {
+        Ok(raw) => raw
+            .parse()
+            .unwrap_or_else(|e| panic!("MYSQL_SSL_MODE: {e}")),
+        Err(_) => default_ssl_mode(),
+    };
     Some(DatabaseConfig {
         name: env::var("MYSQL_NAME").unwrap_or_else(|_| database.clone()),
         host: env::var("MYSQL_HOST").unwrap_or_else(|_| "localhost".into()),
@@ -118,6 +154,7 @@ pub fn load_single_database_from_env() -> Option<DatabaseConfig> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(default_query_timeout),
+        ssl_mode,
     })
 }
 
@@ -262,6 +299,7 @@ mod tests {
                     database: "d".into(),
                     max_connections: 5,
                     query_timeout_secs: 30,
+                    ssl_mode: SslMode::Required,
                 },
                 DatabaseConfig {
                     name: "b".into(),
@@ -272,6 +310,7 @@ mod tests {
                     database: "d".into(),
                     max_connections: 5,
                     query_timeout_secs: 30,
+                    ssl_mode: SslMode::Required,
                 },
             ],
             1000,
@@ -290,6 +329,7 @@ mod tests {
             database: "d".into(),
             max_connections: 5,
             query_timeout_secs: 30,
+            ssl_mode: SslMode::Required,
         };
         let s = format!("{db:?}");
         assert!(!s.contains("secret"));
@@ -314,5 +354,33 @@ mod tests {
         let s = format!("{cfg:?}");
         assert!(!s.contains("super-secret-key"));
         assert!(s.contains("[1 key(s)]"));
+    }
+
+    #[test]
+    fn ssl_mode_defaults_to_required() {
+        let json = one_db_json("primary");
+        let dbs = load_databases_from_json(&json).unwrap();
+        assert_eq!(dbs[0].ssl_mode, SslMode::Required);
+    }
+
+    #[test]
+    fn ssl_mode_parses_disabled_from_json() {
+        let json = r#"[{"name":"x","host":"h","port":3306,"user":"u","password":"p","database":"d","ssl_mode":"disabled"}]"#;
+        let dbs = load_databases_from_json(json).unwrap();
+        assert_eq!(dbs[0].ssl_mode, SslMode::Disabled);
+    }
+
+    #[test]
+    fn ssl_mode_rejects_unknown_value_in_json() {
+        let json = r#"[{"name":"x","host":"h","port":3306,"user":"u","password":"p","database":"d","ssl_mode":"sometimes"}]"#;
+        assert!(load_databases_from_json(json).is_err());
+    }
+
+    #[test]
+    fn ssl_mode_from_str_is_case_insensitive() {
+        assert_eq!("Preferred".parse::<SslMode>().unwrap(), SslMode::Preferred);
+        assert_eq!("DISABLED".parse::<SslMode>().unwrap(), SslMode::Disabled);
+        assert_eq!("required".parse::<SslMode>().unwrap(), SslMode::Required);
+        assert!("nope".parse::<SslMode>().is_err());
     }
 }
