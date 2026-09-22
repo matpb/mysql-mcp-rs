@@ -1,6 +1,7 @@
 FROM rust:1.94-alpine AS builder
 WORKDIR /build
-RUN apk upgrade --no-cache && apk add --no-cache musl-dev
+RUN apk upgrade --no-cache && apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+ENV OPENSSL_STATIC=1
 
 # Cache dependencies — copy manifest first
 COPY Cargo.toml Cargo.lock ./
@@ -19,5 +20,5 @@ RUN touch src/main.rs && \
 FROM gcr.io/distroless/static-debian12
 
 COPY --from=builder /build/target/release/mysql-mcp /usr/local/bin/
-EXPOSE 8421
+EXPOSE 8431
 ENTRYPOINT ["mysql-mcp"]
