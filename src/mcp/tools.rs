@@ -29,7 +29,7 @@ fn db_error_message(e: &sqlx::Error) -> String {
     }
 }
 
-/// Rejects rather than strips: filtering turned "siku.users" into "sikuusers", which either
+/// Rejects rather than strips: filtering turned "app.users" into "appusers", which either
 /// 404s opaquely or describes a different real table.
 fn safe_table_ident(raw: &str) -> Result<String, rmcp::ErrorData> {
     let valid = !raw.is_empty()
@@ -172,13 +172,13 @@ impl MysqlMcp {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ShowTablesParams {
-    /// Database name (e.g. "siku-local", "siku-dev", "siku-prod")
+    /// Database name as configured in MYSQL_DATABASES (e.g. "my-db")
     database: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DescribeTableParams {
-    /// Database name (e.g. "siku-local", "siku-dev", "siku-prod")
+    /// Database name as configured in MYSQL_DATABASES (e.g. "my-db")
     database: String,
     /// Bare table name, unqualified: letters, digits, '_' or '$' only. "schema.table" is rejected —
     /// pick the schema with the 'database' parameter.
@@ -187,7 +187,7 @@ struct DescribeTableParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ExecuteQueryParams {
-    /// Database name (e.g. "siku-local", "siku-dev", "siku-prod")
+    /// Database name as configured in MYSQL_DATABASES (e.g. "my-db")
     database: String,
     /// SQL query. Read-only: must start with SELECT, WITH, TABLE, VALUES, SHOW, DESCRIBE/DESC,
     /// EXPLAIN, or a parenthesized SELECT/TABLE/VALUES/WITH. Write statements (anywhere, not just
@@ -271,7 +271,7 @@ impl MysqlMcp {
         let tables: Vec<String> = rows
             .iter()
             .map(|row| {
-                // SHOW TABLES returns a single column with a dynamic name like "Tables_in_siku",
+                // SHOW TABLES returns a single column with a dynamic name like "Tables_in_<db>",
                 // so take the first value rather than looking it up by name.
                 let json = row_to_json(row);
                 json.as_object()
@@ -690,8 +690,8 @@ mod tool_helpers_tests {
 
     #[test]
     fn safe_table_ident_rejects_instead_of_mangling() {
-        // "siku.users" used to be filtered down to "sikuusers", "my-table" to "mytable".
-        for raw in ["siku.users", "my-table", "a`drop`--", "users users"] {
+        // "app.users" used to be filtered down to "appusers", "my-table" to "mytable".
+        for raw in ["app.users", "my-table", "a`drop`--", "users users"] {
             let err = safe_table_ident(raw).unwrap_err();
             assert!(
                 err.message.contains(raw),
