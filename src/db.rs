@@ -51,7 +51,26 @@ impl PoolManager {
         }
     }
 
-    async fn try_connect(db_config: &DatabaseConfig) -> Result<MySqlPool, String> {
+    /// Builds a manager without contacting any server: each pool opens its first connection on use.
+    /// For tests and tooling; startup uses `new`.
+    pub fn new_lazy(config: &Config) -> Self {
+        let mut pools = HashMap::new();
+        let mut configs = HashMap::new();
+
+        for db_config in &config.databases {
+            configs.insert(db_config.name.clone(), db_config.clone());
+            let (opts, pool_opts) = Self::pool_options(db_config);
+            pools.insert(db_config.name.clone(), pool_opts.connect_lazy_with(opts));
+        }
+
+        Self {
+            pools: tokio::sync::RwLock::new(pools),
+            configs,
+        }
+    }
+
+    /// Connect and pool options for one database, shared by `new` and `new_lazy`.
+    fn pool_options(db_config: &DatabaseConfig) -> (MySqlConnectOptions, MySqlPoolOptions) {
         // Default Required, not verified: MySQL 5.7's auto-generated cert is self-signed.
         let ssl_mode = match db_config.ssl_mode {
             SslMode::Disabled => MySqlSslMode::Disabled,
@@ -68,7 +87,7 @@ impl PoolManager {
 
         let max_execution_ms = db_config.query_timeout_secs.saturating_mul(1000);
 
-        let pool = MySqlPoolOptions::new()
+        let pool_opts = MySqlPoolOptions::new()
             .max_connections(db_config.max_connections)
             .acquire_timeout(Duration::from_secs(10))
             .idle_timeout(Duration::from_secs(300))
@@ -85,7 +104,14 @@ impl PoolManager {
                         .await?;
                     Ok::<(), sqlx::Error>(())
                 })
-            })
+            });
+
+        (opts, pool_opts)
+    }
+
+    async fn try_connect(db_config: &DatabaseConfig) -> Result<MySqlPool, String> {
+        let (opts, pool_opts) = Self::pool_options(db_config);
+        let pool = pool_opts
             .connect_with(opts)
             .await
             .map_err(|e| format!("{e}"))?;

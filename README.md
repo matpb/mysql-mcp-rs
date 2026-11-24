@@ -312,6 +312,7 @@ Layers, in order of application:
 - `MCP_HOST` defaults to `127.0.0.1`. Keep it there unless something else is enforcing access control; the process logs a warning when it binds anywhere else.
 - The Docker setup sets `MCP_HOST=0.0.0.0` *inside the container* and publishes the port on `127.0.0.1` only — the container boundary is what keeps it loopback-only. Do not widen the `ports:` mapping.
 - To reach it from another machine, front it with an authenticating reverse proxy, a VPN, or an SSH tunnel. Do not simply set `MCP_HOST=0.0.0.0` on the host.
+- Without `API_KEYS`, `/mcp` only accepts loopback `Host` headers (`localhost`, `127.0.0.1`, `::1`), which blocks DNS rebinding from a browser. With `API_KEYS` set, any `Host` is accepted so the server works behind Cloud Run or a reverse proxy. A proxy that forwards a public `Host` therefore needs `API_KEYS`.
 - Use a **read-only MySQL user** per database connection.
 - Set `RUST_LOG=mysql_mcp=warn` to minimize log output.
 

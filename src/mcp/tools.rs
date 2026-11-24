@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, ListResourcesResult, PaginatedRequestParams, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+    Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -580,11 +581,12 @@ impl MysqlMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for MysqlMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let db_names = self.pool_manager.database_names();
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
+        info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -614,15 +616,12 @@ impl ServerHandler for MysqlMcp {
             .databases
             .iter()
             .map(|db| {
-                Annotated::new(
-                    RawResource::new(format!("mysql://{}", db.name), db.name.clone())
-                        .with_description(format!(
-                            "MySQL database '{}' (schema: {})",
-                            db.name, db.database
-                        ))
-                        .with_mime_type("application/json"),
-                    None,
-                )
+                Resource::new(format!("mysql://{}", db.name), db.name.clone())
+                    .with_description(format!(
+                        "MySQL database '{}' (schema: {})",
+                        db.name, db.database
+                    ))
+                    .with_mime_type("application/json")
             })
             .collect();
 
@@ -636,7 +635,7 @@ impl ServerHandler for MysqlMcp {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
+    ) -> Result<ReadResourceResponse, ErrorData> {
         let db_name = request
             .uri
             .strip_prefix("mysql://")
@@ -673,7 +672,8 @@ impl ServerHandler for MysqlMcp {
         Ok(ReadResourceResult::new(vec![ResourceContents::text(
             serde_json::to_string_pretty(&info).unwrap_or_default(),
             request.uri,
-        )]))
+        )])
+        .into())
     }
 }
 

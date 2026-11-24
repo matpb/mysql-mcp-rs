@@ -56,14 +56,17 @@ async fn connect(cfg: &Config) -> Arc<PoolManager> {
 /// `Config::api_keys` when non-empty.
 pub fn build_router(cfg: &Config, pool_manager: Arc<PoolManager>) -> axum::Router {
     let mcp_cfg = cfg.clone();
+    let mut http_cfg = StreamableHttpServerConfig::default()
+        .with_legacy_session_mode(false)
+        .with_json_response(true);
+    // With API keys, any Host is accepted (Cloud Run, proxies); without them rmcp's loopback-only Host check guards against DNS rebinding.
+    if cfg.auth_enabled() {
+        http_cfg = http_cfg.disable_allowed_hosts();
+    }
     let mcp_service = StreamableHttpService::new(
         move || Ok(MysqlMcp::new(pool_manager.clone(), mcp_cfg.clone())),
         Arc::new(NeverSessionManager::default()),
-        StreamableHttpServerConfig {
-            stateful_mode: false,
-            json_response: true,
-            ..Default::default()
-        },
+        http_cfg,
     );
 
     let mcp_route = axum::Router::new()
