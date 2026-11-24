@@ -118,7 +118,7 @@ Send the key either as `X-API-Key: <key>` or `Authorization: Bearer <key>`. A mi
 curl -H "X-API-Key: $API_KEY" http://localhost:8431/mcp
 ```
 
-Leaving `API_KEYS` unset or empty keeps the old behaviour: no authentication at all.
+Leaving `API_KEYS` unset or blank keeps the old behaviour: no authentication at all. A value with no keys, such as `API_KEYS=" , ,"`, stops startup instead of disabling auth.
 
 ### stdio
 
@@ -151,7 +151,7 @@ Leaving `API_KEYS` unset or empty keeps the old behaviour: no authentication at 
 | `MYSQL_DATABASES` | *required* | JSON array of database configs (or use the flat `MYSQL_*` form above) |
 | `MCP_HOST` | `127.0.0.1` | HTTP bind address. There is no authentication unless `API_KEYS` is set — see [Security Model](#security-model) |
 | `MCP_PORT` | `8431` | HTTP port |
-| `API_KEYS` | *(empty)* | Comma-separated list of API keys required on `/mcp` over HTTP. Empty disables auth. Ignored in stdio mode |
+| `API_KEYS` | *(empty)* | Comma-separated list of API keys required on `/mcp` over HTTP. Unset or blank disables auth; a value with no keys stops startup. Ignored in stdio mode |
 | `DEFAULT_MAX_ROWS` | `1000` | Row cap applied to every limitable query |
 | `MAX_VALUE_BYTES` | `4096` | Byte cap on a single text or JSON value before truncation |
 | `MAX_BINARY_PREVIEW_BYTES` | `256` | Source-byte cap on a binary value's hex preview |
@@ -204,7 +204,7 @@ No `SET` statement is accepted — not `SET @var`, not `SET @@var`, not a scope 
 Two exceptions:
 
 - `/*! ... */` and `/*!80000 ... */` **version-gated comments are rejected.** MySQL *executes* their contents, so stripping them would change what the server runs — the classic gate-bypass shape.
-- `/*+ ... */` optimizer hints are **preserved verbatim** and reach MySQL.
+- `/*+ ... */` optimizer hints are **preserved verbatim** and reach MySQL. A hint containing a quote or backtick, or left unclosed, is **rejected**.
 
 ### Automatic LIMIT
 

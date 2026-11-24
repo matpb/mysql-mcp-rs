@@ -197,6 +197,10 @@ pub fn apply_limit(query: &str, max_rows: u32) -> String {
     format!("{}{}{}", &query[..from], max_rows, &query[to..])
 }
 
+/// Hint bodies are copied verbatim, so a quote in one would hide text from the quote mask.
+const HINT_ERROR: &str =
+    "Optimizer hints (/*+ ... */) may not contain quotes or backticks, and must be closed with */.";
+
 fn remove_comments(query: &str) -> Result<String, String> {
     let mut result = String::with_capacity(query.len());
     let chars: Vec<char> = query.chars().collect();
@@ -260,19 +264,19 @@ fn remove_comments(query: &str) -> Result<String, String> {
                     result.push(chars[i + 1]);
                     i += 2;
                     while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        // A quote in the verbatim body would desync the quote mask for the rest.
+                        if matches!(chars[i], '\'' | '"' | '`') {
+                            return Err(HINT_ERROR.into());
+                        }
                         result.push(chars[i]);
                         i += 1;
                     }
-                    if i + 1 < len {
-                        result.push(chars[i]);
-                        result.push(chars[i + 1]);
-                        i += 2;
-                    } else {
-                        while i < len {
-                            result.push(chars[i]);
-                            i += 1;
-                        }
+                    if i + 1 >= len {
+                        return Err(HINT_ERROR.into());
                     }
+                    result.push(chars[i]);
+                    result.push(chars[i + 1]);
+                    i += 2;
                     continue;
                 }
                 _ => {

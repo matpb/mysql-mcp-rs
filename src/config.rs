@@ -114,6 +114,18 @@ pub fn parse_api_keys(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Unset or blank `API_KEYS` disables auth; a non-blank value must yield at least one key.
+pub fn api_keys_from_env_value(raw: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(raw) = raw.filter(|r| !r.trim().is_empty()) else {
+        return Ok(vec![]);
+    };
+    let keys = parse_api_keys(raw);
+    if keys.is_empty() {
+        return Err("API_KEYS is set but contains no keys".into());
+    }
+    Ok(keys)
+}
+
 /// Parses the JSON array used for the `MYSQL_DATABASES` environment variable.
 ///
 /// Returns an error if the JSON is invalid or the array is empty.
@@ -182,6 +194,16 @@ impl Config {
                 .unwrap_or(1000),
         );
 
+        // A set but unusable API_KEYS must stop startup, not silently disable auth.
+        let api_keys = match env::var("API_KEYS") {
+            Ok(raw) => api_keys_from_env_value(Some(&raw)),
+            Err(env::VarError::NotPresent) => api_keys_from_env_value(None),
+            Err(env::VarError::NotUnicode(_)) => {
+                Err("API_KEYS is set but is not valid UTF-8".into())
+            }
+        }
+        .unwrap_or_else(|e| panic!("{e}"));
+
         Self {
             max_value_bytes: env::var("MAX_VALUE_BYTES")
                 .ok()
@@ -191,10 +213,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(default_max_binary_preview_bytes),
-            api_keys: env::var("API_KEYS")
-                .ok()
-                .map(|raw| parse_api_keys(&raw))
-                .unwrap_or_default(),
+            api_keys,
             ..cfg
         }
     }
@@ -345,6 +364,34 @@ mod tests {
     #[test]
     fn parse_api_keys_empty_string_gives_empty_vec() {
         assert!(parse_api_keys("").is_empty());
+    }
+
+    #[test]
+    fn api_keys_unset_or_blank_disables_auth() {
+        assert_eq!(api_keys_from_env_value(None), Ok(vec![]));
+        assert_eq!(api_keys_from_env_value(Some("")), Ok(vec![]));
+        assert_eq!(api_keys_from_env_value(Some("  ")), Ok(vec![]));
+    }
+
+    #[test]
+    fn api_keys_with_no_keys_is_an_error() {
+        assert_eq!(
+            api_keys_from_env_value(Some(" , ,")),
+            Err("API_KEYS is set but contains no keys".to_string())
+        );
+        assert!(api_keys_from_env_value(Some(",")).is_err());
+    }
+
+    #[test]
+    fn api_keys_parses_list() {
+        assert_eq!(
+            api_keys_from_env_value(Some("a,b")),
+            Ok(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            api_keys_from_env_value(Some(" a , ,b ")),
+            Ok(vec!["a".to_string(), "b".to_string()])
+        );
     }
 
     #[test]

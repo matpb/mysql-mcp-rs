@@ -624,6 +624,54 @@ fn optimizer_hint_preserved() {
     );
 }
 
+const HINT_ERROR: &str =
+    "Optimizer hints (/*+ ... */) may not contain quotes or backticks, and must be closed with */.";
+
+#[test]
+fn hint_quote_cannot_desync_gate_multi_statement() {
+    let r = sanitize("SELECT /*+ ' */ 1; DELETE FROM t WHERE a = 'x'");
+    assert!(!r.is_valid);
+    assert_eq!(r.error.as_deref(), Some(HINT_ERROR));
+}
+
+#[test]
+fn hint_quote_cannot_desync_gate_into_outfile() {
+    let r = sanitize("SELECT /*+ ' */ 1, '' INTO OUTFILE '/tmp/x'");
+    assert!(!r.is_valid);
+    assert_eq!(r.error.as_deref(), Some(HINT_ERROR));
+}
+
+#[test]
+fn hint_double_quote_rejected() {
+    let r = sanitize("SELECT /*+ \" */ 1 INTO OUTFILE 'x'");
+    assert!(!r.is_valid);
+    assert_eq!(r.error.as_deref(), Some(HINT_ERROR));
+}
+
+#[test]
+fn hint_backtick_rejected() {
+    let r = sanitize("SELECT /*+ ` */ 1");
+    assert!(!r.is_valid);
+    assert_eq!(r.error.as_deref(), Some(HINT_ERROR));
+}
+
+#[test]
+fn unterminated_hint_rejected() {
+    let r = sanitize("SELECT /*+ BKA(t1) * FROM t");
+    assert!(!r.is_valid);
+    assert_eq!(r.error.as_deref(), Some(HINT_ERROR));
+}
+
+#[test]
+fn hint_without_quotes_stays_valid() {
+    assert!(sanitize("SELECT /*+ MAX_EXECUTION_TIME(1000) */ * FROM t").is_valid);
+    let r = sanitize("SELECT /*+ BKA(t1) */ * FROM t1");
+    assert!(r.is_valid);
+    assert_eq!(r.sanitized_query, "SELECT /*+ BKA(t1) */ * FROM t1");
+    let long_hint = format!("SELECT /*+ BKA({}) */ * FROM t1", "t1, ".repeat(1000));
+    assert!(sanitize(&long_hint).is_valid);
+}
+
 #[test]
 fn optimizer_hint_inside_string_not_special() {
     let r = sanitize("SELECT * FROM t WHERE s = '/*! 1 */ /*+ hint */'");
