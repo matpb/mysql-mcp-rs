@@ -18,7 +18,7 @@ Connect your AI tools (Claude Code, Cursor, Windsurf, etc.) to MySQL databases v
 - **Query timeouts** — configurable per-database timeout (default: 30s)
 - **Connection pooling** — configurable pool size per database, connected lazily
 - **Credential safety** — passwords are never logged or exposed in API responses
-- **MCP tools** — `list_databases`, `show_tables`, `describe_table`, `execute_query`
+- **MCP tools** — `list_databases`, `show_tables`, `describe_table`, `execute_query`, `log_sources`, `read_server_log`, `query_activity`
 - **MCP resources** — each database is exposed as a `mysql://<name>` resource
 - **Two transports** — streamable HTTP at `/mcp`, or stdio for a locally spawned binary
 
@@ -181,6 +181,24 @@ Executes a read-only SQL query.
 
 - **Parameters:** `database`, `query`
 
+### `log_sources`
+
+Reports, for each server log and activity source, whether it is available, whether this account can read it, whether it is enabled, and the exact statements a DBA would run to enable it. Run it first. See [Server logs and activity](#server-logs-and-activity).
+
+- **Parameters:** `database`
+
+### `read_server_log`
+
+Reads the error, slow or general log, newest first, with optional time window, substring, priority and user filters. `user` matches a substring of `user_host`, such as `app_user`.
+
+- **Parameters:** `database`, `source` (`error`, `slow` or `general`), and optionally `since`, `until`, `contains`, `min_priority`, `min_query_time_ms`, `user`, `limit`
+
+### `query_activity`
+
+Reads statement history (`recent_statements`), aggregated statement digests (`top_queries`) or server errors by number (`error_summary`).
+
+- **Parameters:** `database`, `view` (`recent_statements`, `top_queries` or `error_summary`), and optionally `contains`, `schema`, `errors_only`, `min_duration_ms`, `order_by`, `limit`
+
 ## Query Rules
 
 ### What is allowed
@@ -287,6 +305,68 @@ When the result comes back at the cap, `truncated` is `true` and `message` says 
 SQL `NULL` and MySQL's zero dates remain plain `null` — those are real values, not failures.
 
 **Escape hatches.** `SELECT col + 0` re-types a `TINYINT(1)` to an integer. `CAST(col AS CHAR)` forces a `BINARY` column to text when its bytes are not valid UTF-8. `ST_AsText(col)` or `ST_AsGeoJSON(col)` returns readable geometry instead of the hex-encoded internal format.
+
+## Server logs and activity
+
+Three read-only tools read the server's own records, so a question like "what ran at 10:00" or "which query is failing" does not need a shell on the database host.
+
+- **`log_sources`** reports, for each source, whether it is available, whether this account can read it, whether it is switched on, and the statements that would switch it on. Run it first.
+- **`read_server_log`** reads `error` (`performance_schema.error_log`, MySQL 8.0.22+), `slow` (`mysql.slow_log`) or `general` (`mysql.general_log`), newest first.
+- **`query_activity`** reads `recent_statements` (the `performance_schema` statement history), `top_queries` (statement digests, aggregated since the server started or the digest tables were truncated) or `error_summary` (server errors by error number, MySQL 8.0+).
+
+`log_sources` reports, per source:
+
+- **available**: `error_log` needs `performance_schema` ON and MySQL 8.0.22+; `error_summary` needs `performance_schema` ON and MySQL 8.0+; `slow_log` and `general_log` need the table to exist; `recent_statements` and `top_queries` need `performance_schema` ON.
+- **readable**: `true` when a `SELECT` on the table works, `false` when the account lacks the grant (the `GRANT` is in `how_to_enable`), `null` when the table is missing.
+- **enabled**: `error_log` and `error_summary` follow `available`; `slow_log` and `general_log` need the log ON and `log_output` including `TABLE`; `recent_statements` needs the history consumer ENABLED; `top_queries` needs the `statements_digest` consumer ENABLED; `null` when `setup_consumers` is unreadable.
+
+Each call probes the server's settings again and keeps nothing between calls. The tools change nothing on the server: no `SET`, no consumer switch. The `how_to_enable` lists are advice for a DBA, and this server never runs them. Each probe and the main query each get the database's query timeout.
+
+Row results use the same envelope and value encoding as `execute_query`, with `source` or `view` added. `started_at` is UTC and ends in `Z`, like the other timestamps. `note` says when rows are approximate (for example `started_at` before MySQL 8.0.16 or with `events_statements_current` off) or when the consumer that feeds them is off. `limit` defaults to 100, must be at least 1, and is clamped to the row cap. `min_duration_ms` may be at most 86400000 (one day). `recent_statements` leaves out `statement/com/Ping` rows.
+
+Statements sent through the binary prepared-statement protocol, which sqlx and most drivers use, show their text on the `statement/com/Prepare` row, joined from `performance_schema.prepared_statements_instances`, on MySQL 5.7 and later. `statement/com/Execute` rows carry no text. Without `SELECT` on that table, these statements show no SQL text.
+
+History keeps the last statements per connection (performance_schema_events_statements_history_size, default 10), so this tool's own probe queries can push out earlier queries made through this server; other sessions' history is unaffected.
+
+### Grants
+
+A missing `SELECT` comes back as `success: false` with the `GRANT` lines in `how_to_enable`. Grant only the sources you use, one `GRANT` per source. Replace `'user'@'host'` with the account the server connects as (`SELECT CURRENT_USER()` shows it).
+
+| Source | Tool and argument | GRANT |
+|---|---|---|
+| `error_log` | `read_server_log`, `source: "error"` | `GRANT SELECT ON performance_schema.error_log TO 'user'@'host';` |
+| `slow_log` | `read_server_log`, `source: "slow"` | `GRANT SELECT ON mysql.slow_log TO 'user'@'host';` |
+| `general_log` | `read_server_log`, `source: "general"` | `GRANT SELECT ON mysql.general_log TO 'user'@'host';` |
+| `recent_statements` | `query_activity`, `view: "recent_statements"` | `GRANT SELECT ON performance_schema.events_statements_history TO 'user'@'host';`, the same for `events_statements_history_long`, `events_statements_current` and `prepared_statements_instances` (the text of binary-protocol statements; without it, those rows have no text) |
+| `top_queries` | `query_activity`, `view: "top_queries"` | `GRANT SELECT ON performance_schema.events_statements_summary_by_digest TO 'user'@'host';` |
+| `error_summary` | `query_activity`, `view: "error_summary"` | `GRANT SELECT ON performance_schema.events_errors_summary_global_by_error TO 'user'@'host';` |
+| consumer state (optional) | `log_sources`, `query_activity` | `GRANT SELECT ON performance_schema.setup_consumers TO 'user'@'host';` |
+
+Without `SELECT` on `setup_consumers`, the consumer state is reported as unknown, not as off.
+
+The Uptime fallback reads `performance_schema.global_status`, which MySQL lets every account read by default, so it needs no `GRANT`.
+
+### Enabling TABLE logging
+
+The slow and general logs write rows to tables only when `log_output` includes `TABLE`. Without that, the tools return only rows written earlier, and `note` says so. On MySQL 8.0 and later a DBA sets this with:
+
+```sql
+SET PERSIST slow_query_log = ON;
+SET PERSIST log_output = 'FILE,TABLE';
+SET PERSIST general_log = ON;   -- only if you want the general log
+```
+
+On MySQL 5.7 the same statements are `SET GLOBAL`. A restart loses them, so also set them in `my.cnf`. `log_sources` prints whichever form applies to the server.
+
+The statement history is filled by consumers in `performance_schema.setup_consumers`. A consumer that is off records nothing. `log_sources` gives the `UPDATE` that switches it on, but that change does not survive a restart: set the matching `performance-schema-consumer-...` option in `my.cnf` to keep it.
+
+`performance_schema` itself must be on, and the server must be restarted after changing it.
+
+**Cloud SQL:** set these as database flags (`slow_query_log`, `general_log`, `log_output`, `performance_schema`) instead of `SET PERSIST`. The `performance_schema` flag is off by default below 12 GB of RAM. Google notes that TABLE output is not rotated and is not shown in Logs Explorer.
+
+### Privacy
+
+The general log, the slow log and the statement history record other sessions' SQL text, literals included: a `WHERE email = 'someone@example.com'` appears in full. `SQL_TEXT` is also cut at `performance_schema_max_sql_text_length` (1024 bytes by default). Grant these tables only to accounts that are allowed to see that data.
 
 ## Security Model
 

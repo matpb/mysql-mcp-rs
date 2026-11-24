@@ -10,7 +10,7 @@ This codebase is yours: what it's for and how it's built are your call, and you'
 - A change to a tool's behaviour or result shape updates `README.md` and the tool description in `src/mcp/tools.rs` in the same change.
 
 ## Commands
-Run from the repo root. None of them needs a MySQL server.
+Run from the repo root. None of them except the live check needs a MySQL server.
 - Build: `cargo build`
 - Full test suite: `cargo test`
 - One test file: `cargo test --test sanitizer` (or `--test auth`)
@@ -18,6 +18,7 @@ Run from the repo root. None of them needs a MySQL server.
 - Format check: `cargo fmt --check`
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Binary usage: `cargo run -- --help`
+- Live check: `./scripts/live-test.sh` needs docker. It starts MySQL 5.7, 8.0 and 8.4 on 127.0.0.1 ports 13306 to 13308 and tears them down. It is the only command that touches MySQL.
 
 The tests never connect to MySQL. Keep it that way: do not point a test at a real server.
 Subcommands are `http` (default) and `stdio`; `README.md` covers how to run each one.
@@ -27,6 +28,7 @@ Subcommands are `http` (default) and `stdio`; `README.md` covers how to run each
 - `src/mcp/tools.rs` holds every MCP tool and the resources. Nothing else lives in `src/mcp/`.
 - Value encoding (what a caller sees for each MySQL type) lives in `src/db.rs` (`encode_row`, `row_to_json`), not in `tools.rs`, even though the tool descriptions there document it. Change both together.
 - `src/sanitizer.rs` is the query gate, and `apply_limit` in the same file applies the row cap.
+- `src/logs.rs` holds the pure SQL builders and parsing for the log and activity tools. Caller values only ever reach SQL as binds.
 - Unit tests are inline `#[cfg(test)]` modules in `src/`. `tests/` holds only the sanitizer and auth suites.
 
 ## Conventions

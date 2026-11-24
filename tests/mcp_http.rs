@@ -117,7 +117,7 @@ async fn initialize_advertises_tools_and_resources_only() {
     assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         result["instructions"],
-        "MySQL MCP Server — read-only access to 1 database(s): shop. Use list_databases to discover available databases. All query tools require a 'database' parameter. Use show_tables to list tables, describe_table for schema, execute_query for SQL. execute_query's description documents how values are encoded (integers past 2^53-1 and DECIMALs are strings, TIMESTAMPs end in Z, column order lives in columns[]); read it before interpreting a result. Resources are available at mysql://<database-name> for each configured database."
+        "MySQL MCP Server — read-only access to 1 database(s): shop. Use list_databases to discover available databases. All query tools require a 'database' parameter. Use show_tables to list tables, describe_table for schema, execute_query for SQL. execute_query's description documents how values are encoded (integers past 2^53-1 and DECIMALs are strings, TIMESTAMPs end in Z, column order lives in columns[]); read it before interpreting a result. Server logs and activity: log_sources, read_server_log and query_activity read the server's error, slow and general logs and performance_schema activity; a missing SELECT grant comes back in how_to_enable. Resources are available at mysql://<database-name> for each configured database."
     );
 }
 
@@ -140,9 +140,29 @@ async fn tools_list_names_are_unchanged() {
             "describe_table",
             "execute_query",
             "list_databases",
+            "log_sources",
+            "query_activity",
+            "read_server_log",
             "show_tables"
         ]
     );
+}
+
+#[tokio::test]
+async fn log_tools_declare_their_required_fields() {
+    let reply = post_mcp(
+        "localhost",
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}),
+    )
+    .await;
+    let tools = reply.body["result"]["tools"].as_array().unwrap();
+    let required = |name: &str| -> Value {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        tool["inputSchema"]["required"].clone()
+    };
+    assert_eq!(required("log_sources"), json!(["database"]));
+    assert_eq!(required("read_server_log"), json!(["database", "source"]));
+    assert_eq!(required("query_activity"), json!(["database", "view"]));
 }
 
 #[tokio::test]
